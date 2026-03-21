@@ -54,4 +54,30 @@ describe("generateOrchestratorPrompt", () => {
     expect(prompt).toContain("Never claim a PR into `app-orchestrator`");
     expect(prompt).toContain("Delegate implementation, test execution, or PR claiming");
   });
+
+  it("requires the orchestrator to keep coordinating until the delivery chain is clear", () => {
+    const prompt = generateOrchestratorPrompt({
+      config,
+      projectId: "my-app",
+      project: config.projects["my-app"]!,
+    });
+
+    expect(prompt).toContain("Do not treat the job as complete while there are open PRs");
+    expect(prompt).toContain("blocked downstream issues");
+    expect(prompt).toContain("unresolved review backlog");
+    expect(prompt).toContain("worker ownership gaps");
+  });
+
+  it("tells the orchestrator to decide whether to restore a worker or hand work to a successor", () => {
+    const prompt = generateOrchestratorPrompt({
+      config,
+      projectId: "my-app",
+      project: config.projects["my-app"]!,
+    });
+
+    expect(prompt).toContain("When a worker is stuck, exits unexpectedly, or loses PR ownership");
+    expect(prompt).toContain("restore the existing worker");
+    expect(prompt).toContain("spawn or redirect a successor worker");
+    expect(prompt).toContain("Escalate to a human only when");
+  });
 });

@@ -332,7 +332,7 @@ describe("check (single session)", () => {
     expect(lm.getStates().get("app-1")).toBe("killed");
   });
 
-  it("stays working when agent is idle but process is still running (fallback path)", async () => {
+  it("detects idle when terminal fallback shows an idle prompt and the process is still running", async () => {
     vi.mocked(mockAgent.getActivityState).mockResolvedValue(null);
     vi.mocked(mockAgent.detectActivity).mockReturnValue("idle");
     vi.mocked(mockAgent.isProcessRunning).mockResolvedValue(true);
@@ -355,7 +355,7 @@ describe("check (single session)", () => {
 
     await lm.check("app-1");
 
-    expect(lm.getStates().get("app-1")).toBe("working");
+    expect(lm.getStates().get("app-1")).toBe("idle");
   });
 
   it("detects needs_input from agent", async () => {
@@ -380,6 +380,97 @@ describe("check (single session)", () => {
     await lm.check("app-1");
 
     expect(lm.getStates().get("app-1")).toBe("needs_input");
+  });
+
+  it("detects idle when the agent is idle below the stuck threshold", async () => {
+    config.reactions = {
+      "agent-stuck": {
+        auto: true,
+        action: "notify",
+        threshold: "10m",
+      },
+    };
+
+    vi.mocked(mockAgent.getActivityState).mockResolvedValue({
+      state: "idle",
+      timestamp: new Date(Date.now() - 60_000),
+    });
+
+    const session = makeSession({ status: "working" });
+    vi.mocked(mockSessionManager.get).mockResolvedValue(session);
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "main",
+      status: "working",
+      project: "my-app",
+    });
+
+    const lm = createLifecycleManager({
+      config,
+      registry: mockRegistry,
+      sessionManager: mockSessionManager,
+    });
+
+    await lm.check("app-1");
+
+    expect(lm.getStates().get("app-1")).toBe("idle");
+  });
+
+  it("treats a visible Codex prompt as idle immediately even when recent activity metadata says active", async () => {
+    vi.mocked(mockAgent.getActivityState).mockResolvedValue({
+      state: "active",
+      timestamp: new Date(),
+    });
+    vi.mocked(mockRuntime.getOutput).mockResolvedValue("Finished.\n> ");
+    vi.mocked(mockAgent.detectActivity).mockReturnValue("idle");
+
+    const session = makeSession({ status: "working" });
+    vi.mocked(mockSessionManager.get).mockResolvedValue(session);
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "main",
+      status: "working",
+      project: "my-app",
+    });
+
+    const lm = createLifecycleManager({
+      config,
+      registry: mockRegistry,
+      sessionManager: mockSessionManager,
+    });
+
+    await lm.check("app-1");
+
+    expect(lm.getStates().get("app-1")).toBe("idle");
+  });
+
+  it("returns idle sessions to working when the agent becomes active again", async () => {
+    vi.mocked(mockAgent.getActivityState).mockResolvedValue({
+      state: "active",
+      timestamp: new Date(),
+    });
+
+    const session = makeSession({ status: "idle" });
+    vi.mocked(mockSessionManager.get).mockResolvedValue(session);
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "main",
+      status: "idle",
+      project: "my-app",
+    });
+
+    const lm = createLifecycleManager({
+      config,
+      registry: mockRegistry,
+      sessionManager: mockSessionManager,
+    });
+
+    await lm.check("app-1");
+
+    expect(lm.getStates().get("app-1")).toBe("working");
   });
 
   it("transitions to stuck when idle exceeds agent-stuck threshold (OpenCode-style activity)", async () => {
@@ -482,8 +573,8 @@ describe("check (single session)", () => {
       getCISummary: vi.fn().mockResolvedValue("passing"),
       getReviews: vi.fn(),
       getReviewDecision: vi.fn().mockResolvedValue("none"),
-      getPendingComments: vi.fn(),
-      getAutomatedComments: vi.fn(),
+      getPendingComments: vi.fn().mockResolvedValue([]),
+      getAutomatedComments: vi.fn().mockResolvedValue([]),
       getMergeability: vi.fn().mockResolvedValue({
         mergeable: false,
         ciPassing: true,
@@ -625,8 +716,8 @@ describe("check (single session)", () => {
       getCISummary: vi.fn().mockResolvedValue("failing"),
       getReviews: vi.fn(),
       getReviewDecision: vi.fn().mockResolvedValue("none"),
-      getPendingComments: vi.fn(),
-      getAutomatedComments: vi.fn(),
+      getPendingComments: vi.fn().mockResolvedValue([]),
+      getAutomatedComments: vi.fn().mockResolvedValue([]),
       getMergeability: vi.fn(),
     };
 
@@ -884,8 +975,8 @@ describe("check (single session)", () => {
       getCISummary: vi.fn().mockResolvedValue("passing"),
       getReviews: vi.fn(),
       getReviewDecision: vi.fn().mockResolvedValue("approved"),
-      getPendingComments: vi.fn(),
-      getAutomatedComments: vi.fn(),
+      getPendingComments: vi.fn().mockResolvedValue([]),
+      getAutomatedComments: vi.fn().mockResolvedValue([]),
       getMergeability: vi.fn().mockResolvedValue({
         mergeable: true,
         ciPassing: true,
@@ -965,6 +1056,68 @@ describe("check (single session)", () => {
 });
 
 describe("reactions", () => {
+  it("calls scm.mergePR for approved-and-green auto-merge reactions", async () => {
+    config.reactions = {
+      "approved-and-green": {
+        auto: true,
+        action: "auto-merge",
+        priority: "action",
+      },
+    };
+
+    const mockSCM: SCM = {
+      name: "mock-scm",
+      detectPR: vi.fn(),
+      getPRState: vi.fn().mockResolvedValue("open"),
+      mergePR: vi.fn().mockResolvedValue(undefined),
+      closePR: vi.fn(),
+      getCIChecks: vi.fn(),
+      getCISummary: vi.fn().mockResolvedValue("passing"),
+      getReviews: vi.fn(),
+      getReviewDecision: vi.fn().mockResolvedValue("approved"),
+      getPendingComments: vi.fn().mockResolvedValue([]),
+      getAutomatedComments: vi.fn().mockResolvedValue([]),
+      getMergeability: vi.fn().mockResolvedValue({
+        mergeable: true,
+        ciPassing: true,
+        approved: true,
+        noConflicts: true,
+        blockers: [],
+      }),
+    };
+
+    const registryWithSCM: PluginRegistry = {
+      ...mockRegistry,
+      get: vi.fn().mockImplementation((slot: string) => {
+        if (slot === "runtime") return mockRuntime;
+        if (slot === "agent") return mockAgent;
+        if (slot === "scm") return mockSCM;
+        return null;
+      }),
+    };
+
+    const session = makeSession({ status: "approved", pr: makePR() });
+    vi.mocked(mockSessionManager.get).mockResolvedValue(session);
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "main",
+      status: "approved",
+      project: "my-app",
+    });
+
+    const lm = createLifecycleManager({
+      config,
+      registry: registryWithSCM,
+      sessionManager: mockSessionManager,
+    });
+
+    await lm.check("app-1");
+
+    expect(lm.getStates().get("app-1")).toBe("mergeable");
+    expect(mockSCM.mergePR).toHaveBeenCalledWith(session.pr);
+  });
+
   it("triggers send-to-agent reaction on CI failure", async () => {
     config.reactions = {
       "ci-failed": {
@@ -1146,6 +1299,281 @@ describe("reactions", () => {
     // send-to-agent reaction should have been executed
     expect(mockSessionManager.send).toHaveBeenCalledWith("app-1", "Fix CI");
     // Notifier should NOT have been called — the reaction is handling it
+    expect(mockNotifier.notify).not.toHaveBeenCalled();
+  });
+
+  it("nudges an idle orchestrator session to continue coordinating", async () => {
+    config.reactions = {
+      "agent-idle": {
+        auto: true,
+        action: "send-to-agent",
+        message: "Continue coordinating the unfinished execution chain without waiting for human input.",
+      },
+    };
+
+    vi.mocked(mockAgent.getActivityState).mockResolvedValue({
+      state: "idle",
+      timestamp: new Date(Date.now() - 60_000),
+    });
+
+    const session = makeSession({
+      id: "app-orchestrator",
+      status: "working",
+      branch: "main",
+      issueId: null,
+      metadata: { role: "orchestrator" },
+    });
+    vi.mocked(mockSessionManager.get).mockResolvedValue(session);
+
+    writeMetadata(sessionsDir, "app-orchestrator", {
+      worktree: "/tmp",
+      branch: "main",
+      status: "working",
+      project: "my-app",
+      role: "orchestrator",
+    });
+
+    const lm = createLifecycleManager({
+      config,
+      registry: mockRegistry,
+      sessionManager: mockSessionManager,
+    });
+
+    await lm.check("app-orchestrator");
+
+    expect(lm.getStates().get("app-orchestrator")).toBe("idle");
+    expect(mockSessionManager.send).toHaveBeenCalledWith(
+      "app-orchestrator",
+      "Continue coordinating the unfinished execution chain without waiting for human input.",
+    );
+  });
+
+  it("routes send-to-orchestrator reactions to the orchestrator session", async () => {
+    config.reactions = {
+      "agent-stuck": {
+        auto: true,
+        action: "send-to-orchestrator",
+        message: "A worker appears stuck. Decide how to keep the task moving.",
+        threshold: "10m",
+      },
+    };
+
+    const oldTimestamp = new Date(Date.now() - 20 * 60_000);
+    const stuckAgent: Agent = {
+      ...mockAgent,
+      getActivityState: vi.fn().mockResolvedValue({
+        state: "blocked" as ActivityState,
+        timestamp: oldTimestamp,
+      }),
+    };
+
+    const registryWithAgent: PluginRegistry = {
+      ...mockRegistry,
+      get: vi.fn().mockImplementation((slot: string) => {
+        if (slot === "runtime") return mockRuntime;
+        if (slot === "agent") return stuckAgent;
+        return null;
+      }),
+    };
+
+    const session = makeSession({ status: "working", issueId: "TEST-19" });
+    vi.mocked(mockSessionManager.get).mockImplementation(async (sessionId: string) => {
+      if (sessionId === "app-orchestrator") {
+        return makeSession({
+          id: "app-orchestrator",
+          status: "working",
+          branch: "main",
+          workspacePath: join(tmpDir, "my-app"),
+          runtimeHandle: { id: "rt-orchestrator", runtimeName: "mock", data: {} },
+          metadata: { role: "orchestrator" },
+        });
+      }
+      return session;
+    });
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "feat/TEST-19",
+      status: "working",
+      project: "my-app",
+      issue: "TEST-19",
+    });
+
+    const lm = createLifecycleManager({
+      config,
+      registry: registryWithAgent,
+      sessionManager: mockSessionManager,
+    });
+
+    await lm.check("app-1");
+
+    expect(mockSessionManager.send).toHaveBeenCalledWith(
+      "app-orchestrator",
+      expect.stringContaining("Session: app-1"),
+    );
+    expect(mockSessionManager.send).toHaveBeenCalledWith(
+      "app-orchestrator",
+      expect.stringContaining("Trigger: agent-stuck"),
+    );
+  });
+
+  it("spawns the orchestrator before routing send-to-orchestrator reactions when it is missing", async () => {
+    config.reactions = {
+      "agent-exited": {
+        auto: true,
+        action: "send-to-orchestrator",
+        message: "A worker exited unexpectedly. Decide whether to restore it or replace it.",
+      },
+    };
+
+    const exitedAgent: Agent = {
+      ...mockAgent,
+      getActivityState: vi.fn().mockResolvedValue({
+        state: "exited" as ActivityState,
+        timestamp: new Date(),
+      }),
+    };
+
+    const registryWithAgent: PluginRegistry = {
+      ...mockRegistry,
+      get: vi.fn().mockImplementation((slot: string) => {
+        if (slot === "runtime") return mockRuntime;
+        if (slot === "agent") return exitedAgent;
+        return null;
+      }),
+    };
+
+    const session = makeSession({ status: "working", issueId: "TEST-22" });
+    vi.mocked(mockSessionManager.get).mockImplementation(async (sessionId: string) => {
+      if (sessionId === "app-orchestrator") {
+        return null;
+      }
+      return session;
+    });
+    vi.mocked(mockSessionManager.spawnOrchestrator).mockResolvedValue(
+      makeSession({
+        id: "app-orchestrator",
+        status: "working",
+        branch: "main",
+        workspacePath: join(tmpDir, "my-app"),
+        runtimeHandle: { id: "rt-orchestrator", runtimeName: "mock", data: {} },
+        metadata: { role: "orchestrator" },
+      }),
+    );
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "feat/TEST-22",
+      status: "working",
+      project: "my-app",
+      issue: "TEST-22",
+    });
+
+    const lm = createLifecycleManager({
+      config,
+      registry: registryWithAgent,
+      sessionManager: mockSessionManager,
+    });
+
+    await lm.check("app-1");
+
+    expect(mockSessionManager.spawnOrchestrator).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId: "my-app",
+        systemPrompt: expect.stringContaining("My App Orchestrator"),
+      }),
+    );
+    expect(mockSessionManager.send).toHaveBeenCalledWith(
+      "app-orchestrator",
+      expect.stringContaining("Trigger: agent-exited"),
+    );
+  });
+
+  it("escalates failed send-to-agent reactions to the orchestrator before notifying humans", async () => {
+    config.reactions = {
+      "ci-failed": {
+        auto: true,
+        action: "send-to-agent",
+        message: "Fix CI",
+        retries: 2,
+        escalateTo: "orchestrator",
+      },
+    };
+
+    const mockNotifier: Notifier = {
+      name: "mock-notifier",
+      notify: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const mockSCM: SCM = {
+      name: "mock-scm",
+      detectPR: vi.fn(),
+      getPRState: vi.fn().mockResolvedValue("open"),
+      mergePR: vi.fn(),
+      closePR: vi.fn(),
+      getCIChecks: vi.fn(),
+      getCISummary: vi.fn().mockResolvedValue("failing"),
+      getReviews: vi.fn(),
+      getReviewDecision: vi.fn().mockResolvedValue("none"),
+      getPendingComments: vi.fn().mockResolvedValue([]),
+      getAutomatedComments: vi.fn().mockResolvedValue([]),
+      getMergeability: vi.fn(),
+    };
+
+    const registryWithNotifier: PluginRegistry = {
+      ...mockRegistry,
+      get: vi.fn().mockImplementation((slot: string, name: string) => {
+        if (slot === "runtime") return mockRuntime;
+        if (slot === "agent") return mockAgent;
+        if (slot === "scm") return mockSCM;
+        if (slot === "notifier" && name === "desktop") return mockNotifier;
+        return null;
+      }),
+    };
+
+    const session = makeSession({ status: "pr_open", pr: makePR(), issueId: "TEST-31" });
+    vi.mocked(mockSessionManager.get).mockImplementation(async (sessionId: string) => {
+      if (sessionId === "app-orchestrator") {
+        return makeSession({
+          id: "app-orchestrator",
+          status: "working",
+          branch: "main",
+          workspacePath: join(tmpDir, "my-app"),
+          runtimeHandle: { id: "rt-orchestrator", runtimeName: "mock", data: {} },
+          metadata: { role: "orchestrator" },
+        });
+      }
+      return session;
+    });
+    vi.mocked(mockSessionManager.send).mockImplementation(async (sessionId: string) => {
+      if (sessionId === "app-1") {
+        throw new Error("worker unavailable");
+      }
+    });
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "feat/TEST-31",
+      status: "pr_open",
+      project: "my-app",
+      issue: "TEST-31",
+      pr: "https://github.com/org/repo/pull/42",
+    });
+
+    const lm = createLifecycleManager({
+      config,
+      registry: registryWithNotifier,
+      sessionManager: mockSessionManager,
+    });
+
+    await lm.check("app-1");
+
+    expect(mockSessionManager.send).toHaveBeenNthCalledWith(1, "app-1", "Fix CI");
+    expect(mockSessionManager.send).toHaveBeenNthCalledWith(
+      2,
+      "app-orchestrator",
+      expect.stringContaining("Trigger: ci-failed"),
+    );
     expect(mockNotifier.notify).not.toHaveBeenCalled();
   });
 
@@ -1367,6 +1795,89 @@ describe("reactions", () => {
 
     const metadata = readMetadataRaw(sessionsDir, "app-1");
     expect(metadata?.["lastAutomatedReviewDispatchHash"]).toBe("bot-1");
+  });
+
+  it("does not enter mergeable while automated review backlog remains", async () => {
+    config.reactions = {
+      "approved-and-green": {
+        auto: true,
+        action: "auto-merge",
+        priority: "action",
+      },
+      "bugbot-comments": {
+        auto: true,
+        action: "send-to-agent",
+        message: "Handle automated review findings.",
+      },
+    };
+
+    const mockSCM: SCM = {
+      name: "mock-scm",
+      detectPR: vi.fn(),
+      getPRState: vi.fn().mockResolvedValue("open"),
+      mergePR: vi.fn().mockResolvedValue(undefined),
+      closePR: vi.fn(),
+      getCIChecks: vi.fn(),
+      getCISummary: vi.fn().mockResolvedValue("passing"),
+      getReviews: vi.fn(),
+      getReviewDecision: vi.fn().mockResolvedValue("approved"),
+      getPendingComments: vi.fn().mockResolvedValue([]),
+      getAutomatedComments: vi.fn().mockResolvedValue([
+        {
+          id: "bot-1",
+          botName: "chatgpt-codex-connector",
+          body: "Potential issue detected",
+          path: "src/worker.ts",
+          line: 9,
+          severity: "error",
+          createdAt: new Date(),
+          url: "https://example.com/comment/9",
+        },
+      ]),
+      getMergeability: vi.fn().mockResolvedValue({
+        mergeable: true,
+        ciPassing: true,
+        approved: true,
+        noConflicts: true,
+        blockers: [],
+      }),
+    };
+
+    const registryWithSCM: PluginRegistry = {
+      ...mockRegistry,
+      get: vi.fn().mockImplementation((slot: string) => {
+        if (slot === "runtime") return mockRuntime;
+        if (slot === "agent") return mockAgent;
+        if (slot === "scm") return mockSCM;
+        return null;
+      }),
+    };
+
+    const session = makeSession({ status: "pr_open", pr: makePR() });
+    vi.mocked(mockSessionManager.get).mockResolvedValue(session);
+    vi.mocked(mockSessionManager.send).mockResolvedValue(undefined);
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "main",
+      status: "pr_open",
+      project: "my-app",
+    });
+
+    const lm = createLifecycleManager({
+      config,
+      registry: registryWithSCM,
+      sessionManager: mockSessionManager,
+    });
+
+    await lm.check("app-1");
+
+    expect(lm.getStates().get("app-1")).toBe("approved");
+    expect(mockSessionManager.send).toHaveBeenCalledWith(
+      "app-1",
+      "Handle automated review findings.",
+    );
+    expect(mockSCM.mergePR).not.toHaveBeenCalled();
   });
 
   it("notifies humans on significant transitions without reaction config", async () => {

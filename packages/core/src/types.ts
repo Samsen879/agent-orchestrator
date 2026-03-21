@@ -843,8 +843,8 @@ export interface ReactionConfig {
   /** Whether this reaction is enabled */
   auto: boolean;
 
-  /** What to do: send message to agent, notify human, auto-merge */
-  action: "send-to-agent" | "notify" | "auto-merge";
+  /** What to do: send message to agent/orchestrator, notify human, auto-merge */
+  action: "send-to-agent" | "send-to-orchestrator" | "notify" | "auto-merge";
 
   /** Message to send (for send-to-agent) */
   message?: string;
@@ -857,6 +857,9 @@ export interface ReactionConfig {
 
   /** Escalate to human notification after this many failures or this duration */
   escalateAfter?: number | string;
+
+  /** Where escalation should be routed once automation can no longer continue normally */
+  escalateTo?: "human" | "orchestrator";
 
   /** Threshold duration for time-based triggers (e.g. "10m" for stuck detection) */
   threshold?: string;

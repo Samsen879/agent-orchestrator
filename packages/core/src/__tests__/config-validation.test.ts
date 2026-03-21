@@ -581,4 +581,53 @@ describe("Config Defaults", () => {
     expect(validated.projects.proj1.tracker).toEqual({ plugin: "gitlab", host: "gitlab.com" });
     expect(validated.projects.proj1.scm).toEqual({ plugin: "gitlab" });
   });
+
+  it("accepts send-to-orchestrator reactions and orchestrator escalation targets", () => {
+    const validated = validateConfig({
+      projects: {
+        proj1: {
+          path: "/repos/test",
+          repo: "org/test",
+          defaultBranch: "main",
+          reactions: {
+            "agent-stuck": {
+              auto: true,
+              action: "send-to-orchestrator",
+              message: "Investigate the stuck worker.",
+            },
+            "ci-failed": {
+              auto: true,
+              action: "send-to-agent",
+              message: "Fix CI.",
+              escalateTo: "orchestrator",
+            },
+          },
+        },
+      },
+    });
+
+    expect(validated.projects.proj1.reactions?.["agent-stuck"]?.action).toBe("send-to-orchestrator");
+    expect(validated.projects.proj1.reactions?.["ci-failed"]?.escalateTo).toBe("orchestrator");
+  });
+
+  it("routes worker interruption defaults to the orchestrator", () => {
+    const validated = validateConfig({
+      projects: {
+        proj1: {
+          path: "/repos/test",
+          repo: "org/test",
+          defaultBranch: "main",
+        },
+      },
+    });
+
+    expect(validated.reactions["agent-stuck"]?.action).toBe("send-to-orchestrator");
+    expect(validated.reactions["agent-needs-input"]?.action).toBe("send-to-orchestrator");
+    expect(validated.reactions["agent-exited"]?.action).toBe("send-to-orchestrator");
+    expect(validated.reactions["ci-failed"]?.escalateTo).toBe("orchestrator");
+    expect(validated.reactions["changes-requested"]?.escalateTo).toBe("orchestrator");
+    expect(validated.reactions["bugbot-comments"]?.escalateTo).toBe("orchestrator");
+    expect(validated.reactions["merge-conflicts"]?.escalateTo).toBe("orchestrator");
+    expect(validated.reactions["agent-idle"]?.escalateTo).toBe("orchestrator");
+  });
 });

@@ -567,11 +567,27 @@ describe("detectActivity", () => {
     expect(agent.detectActivity("some output\n# ")).toBe("idle");
   });
 
+  it("returns idle when last line is a Codex input placeholder", () => {
+    expect(agent.detectActivity("some output\n› Improve documentation in @filename")).toBe("idle");
+    expect(agent.detectActivity("some output\n❯ Continue coordinating")).toBe("idle");
+  });
+
   it("returns idle when prompt follows historical activity indicators", () => {
     // Key regression test: historical active output in the buffer
     // should NOT override an idle prompt on the last line.
     expect(agent.detectActivity("✶ Reading files\nDone.\n> ")).toBe("idle");
     expect(agent.detectActivity("Working on task (esc to interrupt)\nFinished.\n$ ")).toBe("idle");
+    expect(
+      agent.detectActivity("• Completed review\nI will keep watching.\n› Improve documentation in @filename"),
+    ).toBe("idle");
+  });
+
+  it("returns idle when a Codex status footer follows the prompt", () => {
+    expect(
+      agent.detectActivity(
+        "• 已处理：继续监控 worker\n\n› Improve documentation in @filename\n\n  gpt-5.4 xhigh · 20% left · ~/code/ciecopilot-home",
+      ),
+    ).toBe("idle");
   });
 
   // -- Waiting input states --

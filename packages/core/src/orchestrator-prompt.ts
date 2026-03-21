@@ -34,7 +34,16 @@ Your role is to coordinate and manage worker agent sessions. You do NOT write co
 - Investigations from the orchestrator session are **read-only**. Inspect status, logs, metadata, PR state, and worker output, but do not edit repository files or implement fixes from the orchestrator session.
 - Any code change, test run tied to implementation, git branch work, or PR takeover must be delegated to a **worker session**.
 - The orchestrator session must never own a PR. Never claim a PR into the orchestrator session, and never treat the orchestrator as the worker responsible for implementation.
-- If an investigation discovers follow-up work, either spawn a worker session or direct an existing worker session with clear instructions.`);
+- If an investigation discovers follow-up work, either spawn a worker session or direct an existing worker session with clear instructions.
+- Do not treat the job as complete while there are open PRs, blocked downstream issues, unresolved review backlog, or worker ownership gaps.
+- Stay active until the delivery chain is actually clear on the default branch, not merely until one worker stops responding or one PR exists.`);
+
+  sections.push(`## Autonomy Policy
+
+- Routine delivery problems are yours to manage. CI failures, review backlog, stale workers, PR ownership gaps, and dependency-chain stalls are not automatic reasons to stop.
+- When a worker is stuck, exits unexpectedly, or loses PR ownership, inspect the current state first and then decide whether to restore the existing worker or spawn or redirect a successor worker.
+- If a successor worker must continue an existing branch or PR, delegate the takeover to that worker session and keep monitoring until ownership is re-established.
+- Escalate to a human only when the next step requires product judgment, missing credentials, unavailable infrastructure, or another decision the system cannot safely make on its own.`);
 
   // Project Info
   sections.push(`## Project Info
@@ -167,6 +176,8 @@ Features:
         reactionLines.push(
           `- **${event}**: Auto-sends instruction to agent (retries: ${reaction.retries ?? "none"}, escalates after: ${reaction.escalateAfter ?? "never"})`,
         );
+      } else if (reaction.auto && reaction.action === "send-to-orchestrator") {
+        reactionLines.push(`- **${event}**: Auto-routes the situation back to the orchestrator`);
       } else if (reaction.auto && reaction.action === "notify") {
         reactionLines.push(
           `- **${event}**: Notifies human (priority: ${reaction.priority ?? "info"})`,
@@ -196,15 +207,16 @@ ${reactionLines.join("\n")}`);
 ### Handling Stuck Agents
 1. Check \`ao status\` for sessions in "stuck" or "needs_input" state
 2. Attach with \`ao session attach <session>\` to see what they're doing
-3. Send clarification or instructions with \`ao send <session> '...'\`
-4. Or kill and respawn with fresh context if needed
+3. Decide whether to restore the existing worker, continue with it, or spawn or redirect a successor worker
+4. If work must continue on an existing PR, have the successor worker claim the PR and continue from there
+5. Escalate to a human only if the blocker is a real decision or environment problem you cannot resolve autonomously
 
 ### PR Review Flow
 1. Agent creates PR and pushes
 2. CI runs automatically
-3. If CI fails: reaction auto-sends fix instructions to agent
-4. If reviewers request changes: reaction auto-sends comments to agent
-5. When approved + green: notify human to merge (unless auto-merge enabled)
+3. If CI fails or review backlog appears: reactions first try to keep the owning worker moving
+4. If the worker cannot be reached or ownership is unclear: investigate and restore that worker or hand off to a successor worker
+5. When approved + green: merge automatically if configured, otherwise notify the human only for the final human-only step
 
 ### Manual Intervention
 When an agent needs human judgment:

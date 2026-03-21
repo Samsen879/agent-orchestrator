@@ -61,6 +61,24 @@ function buildAgentPath(basePath: string | undefined): string {
   return ordered.join(":");
 }
 
+function isLikelyCodexStatusFooter(line: string): boolean {
+  if (!line.includes("·")) return false;
+
+  const parts = line
+    .split("·")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (parts.length < 2) return false;
+
+  const firstPart = parts[0] ?? "";
+  const lastPart = parts[parts.length - 1] ?? "";
+  const hasPath = /^(?:~\/|\/)/.test(lastPart);
+  const hasBudget = /\b\d+%\s+left\b/i.test(line);
+  const hasModel = /^(?:gpt|o\d|codex)[\w.+-]*(?:\s+(?:low|medium|high|xhigh))?/i.test(firstPart);
+
+  return hasPath && (hasBudget || hasModel);
+}
+
 // =============================================================================
 // Plugin Manifest
 // =============================================================================
@@ -683,11 +701,19 @@ function createCodexAgent(): Agent {
     detectActivity(terminalOutput: string): ActivityState {
       if (!terminalOutput.trim()) return "idle";
 
-      const lines = terminalOutput.trim().split("\n");
+      const lines = terminalOutput
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean);
+      while (lines.length > 1 && isLikelyCodexStatusFooter(lines[lines.length - 1] ?? "")) {
+        lines.pop();
+      }
       const lastLine = lines[lines.length - 1]?.trim() ?? "";
 
-      // If Codex is showing its input prompt, it's idle
-      if (/^[>$#]\s*$/.test(lastLine)) return "idle";
+      // If Codex is showing its input prompt, it's idle. Codex commonly uses
+      // a bare shell-like prompt or an input placeholder line beginning with
+      // › / ❯ once a turn has completed and it is waiting for the next message.
+      if (/^(?:[>$#]\s*|[›❯](?:\s.*)?)$/.test(lastLine)) return "idle";
 
       // Check last few lines for approval prompts
       const tail = lines.slice(-5).join("\n");

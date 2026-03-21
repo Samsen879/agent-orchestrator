@@ -30,13 +30,16 @@ import {
   type SCM,
   type Notifier,
   type Session,
+  type ActivityState,
   type EventPriority,
-  type ProjectConfig as _ProjectConfig,
+  type ProjectConfig,
+  isOrchestratorSession,
 } from "./types.js";
 import { updateMetadata } from "./metadata.js";
 import { getSessionsDir } from "./paths.js";
 import { createCorrelationId, createProjectObserver } from "./observability.js";
 import { resolveAgentSelection, resolveSessionRole } from "./agent-selection.js";
+import { generateOrchestratorPrompt } from "./orchestrator-prompt.js";
 
 /** Parse a duration string like "10m", "30s", "1h" to milliseconds. */
 function parseDuration(str: string): number {
@@ -105,6 +108,8 @@ function statusToEventType(_from: SessionStatus | undefined, to: SessionStatus):
   switch (to) {
     case "working":
       return "session.working";
+    case "idle":
+      return "session.idle";
     case "pr_open":
       return "pr.created";
     case "ci_failed":
@@ -151,6 +156,8 @@ function eventToReactionKey(eventType: EventType): string | null {
       return "agent-needs-input";
     case "session.killed":
       return "agent-exited";
+    case "session.idle":
+      return "agent-idle";
     case "summary.all_complete":
       return "all-complete";
     default:
@@ -225,6 +232,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
 
     // Track activity state across steps so stuck detection can run after PR checks
     let detectedIdleTimestamp: Date | null = null;
+    let observedActivity: ActivityState | null = null;
 
     // 1. Check if runtime is alive
     if (session.runtimeHandle) {
@@ -241,6 +249,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
         // Try JSONL-based activity detection first (reads agent's session files directly)
         const activityState = await agent.getActivityState(session, config.readyThresholdMs);
         if (activityState) {
+          observedActivity = activityState.state;
           if (activityState.state === "waiting_input") return "needs_input";
           if (activityState.state === "exited") return "killed";
 
@@ -249,6 +258,29 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
             activityState.timestamp
           ) {
             detectedIdleTimestamp = activityState.timestamp;
+          }
+
+          // JSONL mtime is coarse for Codex-like TUIs: a turn can finish and
+          // show a prompt while the session file still looks "recently active".
+          // Refine with terminal output when available so prompt-visible agents
+          // are treated as idle immediately instead of waiting for the file to age.
+          if (
+            session.runtimeHandle &&
+            (activityState.state === "active" || activityState.state === "ready")
+          ) {
+            const runtime = registry.get<Runtime>(
+              "runtime",
+              project.runtime ?? config.defaults.runtime,
+            );
+            const terminalOutput = runtime ? await runtime.getOutput(session.runtimeHandle, 10) : "";
+            if (terminalOutput) {
+              const refinedActivity = agent.detectActivity(terminalOutput);
+              if (refinedActivity === "waiting_input") return "needs_input";
+              if (refinedActivity === "idle") {
+                observedActivity = "idle";
+                detectedIdleTimestamp = new Date();
+              }
+            }
           }
 
           // active/ready/idle (below threshold)/blocked (below threshold) —
@@ -262,6 +294,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
           const terminalOutput = runtime ? await runtime.getOutput(session.runtimeHandle, 10) : "";
           if (terminalOutput) {
             const activity = agent.detectActivity(terminalOutput);
+            observedActivity = activity;
             if (activity === "waiting_input") return "needs_input";
 
             const processAlive = await agent.isProcessRunning(session.runtimeHandle);
@@ -327,7 +360,12 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
           // the same as "approved" so CI-green PRs reach "mergeable" status
           // and fire the merge.ready event / approved-and-green reaction.
           const mergeReady = await scm.getMergeability(session.pr);
-          if (mergeReady.mergeable) return "mergeable";
+          if (mergeReady.mergeable) {
+            // Automated review backlog is a merge blocker for lifecycle-driven
+            // automation even when GitHub reports the PR as mergeable.
+            const automatedComments = await scm.getAutomatedComments(session.pr);
+            if (automatedComments.length === 0) return "mergeable";
+          }
           if (reviewDecision === "approved") return "approved";
         }
         if (reviewDecision === "pending") return "review_pending";
@@ -353,11 +391,20 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
       return "stuck";
     }
 
-    // 6. Default: if agent is active, it's working
+    if (observedActivity === "idle") {
+      return "idle";
+    }
+
+    // 6. Default: if agent is active/ready, it's working
+    if (observedActivity === "active" || observedActivity === "ready") {
+      return "working";
+    }
+
     if (
       session.status === "spawning" ||
       session.status === SESSION_STATUS.STUCK ||
-      session.status === SESSION_STATUS.NEEDS_INPUT
+      session.status === SESSION_STATUS.NEEDS_INPUT ||
+      session.status === SESSION_STATUS.IDLE
     ) {
       return "working";
     }
@@ -402,13 +449,25 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
       shouldEscalate = true;
     }
 
-    if (shouldEscalate) {
-      // Escalate to human
+    const escalateReaction = async (reason: string): Promise<ReactionResult> => {
+      if (reactionConfig.escalateTo === "orchestrator") {
+        const routed = await routeReactionToOrchestrator({
+          sessionId,
+          projectId,
+          reactionKey,
+          reactionConfig,
+          escalationReason: reason,
+        });
+        if (routed) {
+          return routed;
+        }
+      }
+
       const event = createEvent("reaction.escalated", {
         sessionId,
         projectId,
-        message: `Reaction '${reactionKey}' escalated after ${tracker.attempts} attempts`,
-        data: { reactionKey, attempts: tracker.attempts },
+        message: `Reaction '${reactionKey}' escalated after ${tracker?.attempts ?? 0} attempts`,
+        data: { reactionKey, attempts: tracker?.attempts ?? 0, reason },
       });
       await notifyHuman(event, reactionConfig.priority ?? "urgent");
       return {
@@ -417,6 +476,12 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
         action: "escalated",
         escalated: true,
       };
+    };
+
+    if (shouldEscalate) {
+      return escalateReaction(
+        `Reaction '${reactionKey}' exceeded its retry or escalation threshold.`,
+      );
     }
 
     // Execute the reaction action
@@ -435,8 +500,22 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
               message: reactionConfig.message,
               escalated: false,
             };
-          } catch {
-            // Send failed — allow retry on next poll cycle (don't escalate immediately)
+          } catch (err) {
+            if (reactionConfig.escalateTo === "orchestrator") {
+              const routed = await routeReactionToOrchestrator({
+                sessionId,
+                projectId,
+                reactionKey,
+                reactionConfig,
+                failureReason: err instanceof Error ? err.message : String(err),
+              });
+              if (routed) {
+                return routed;
+              }
+            }
+
+            // Send failed — allow retry on next poll cycle when we are not
+            // immediately handing the problem to the orchestrator.
             return {
               reactionType: reactionKey,
               success: false,
@@ -446,6 +525,32 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
           }
         }
         break;
+      }
+
+      case "send-to-orchestrator": {
+        const routed = await routeReactionToOrchestrator({
+          sessionId,
+          projectId,
+          reactionKey,
+          reactionConfig,
+        });
+        if (routed) {
+          return routed;
+        }
+
+        const event = createEvent("reaction.escalated", {
+          sessionId,
+          projectId,
+          message: `Reaction '${reactionKey}' could not be routed to the orchestrator`,
+          data: { reactionKey },
+        });
+        await notifyHuman(event, reactionConfig.priority ?? "urgent");
+        return {
+          reactionType: reactionKey,
+          success: true,
+          action: "notify",
+          escalated: true,
+        };
       }
 
       case "notify": {
@@ -465,21 +570,50 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
       }
 
       case "auto-merge": {
-        // Auto-merge is handled by the SCM plugin
-        // For now, just notify
-        const event = createEvent("reaction.triggered", {
-          sessionId,
-          projectId,
-          message: `Reaction '${reactionKey}' triggered auto-merge`,
-          data: { reactionKey },
-        });
-        await notifyHuman(event, "action");
-        return {
-          reactionType: reactionKey,
-          success: true,
-          action: "auto-merge",
-          escalated: false,
-        };
+        const session = await sessionManager.get(sessionId);
+        if (!session?.pr) {
+          return {
+            reactionType: reactionKey,
+            success: false,
+            action: "auto-merge",
+            escalated: false,
+          };
+        }
+
+        const project = config.projects[projectId];
+        const scm = project?.scm ? registry.get<SCM>("scm", project.scm.plugin) : null;
+        if (!scm) {
+          return {
+            reactionType: reactionKey,
+            success: false,
+            action: "auto-merge",
+            escalated: false,
+          };
+        }
+
+        try {
+          await scm.mergePR(session.pr);
+          const event = createEvent("reaction.triggered", {
+            sessionId,
+            projectId,
+            message: `Reaction '${reactionKey}' triggered auto-merge`,
+            data: { reactionKey, pr: session.pr.url },
+          });
+          await notifyHuman(event, "action");
+          return {
+            reactionType: reactionKey,
+            success: true,
+            action: "auto-merge",
+            escalated: false,
+          };
+        } catch {
+          return {
+            reactionType: reactionKey,
+            success: false,
+            action: "auto-merge",
+            escalated: false,
+          };
+        }
       }
     }
 
@@ -506,6 +640,132 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
       ? { ...globalReaction, ...projectReaction }
       : globalReaction;
     return reactionConfig ? (reactionConfig as ReactionConfig) : null;
+  }
+
+  function getProjectConfig(projectId: string): ProjectConfig | null {
+    return config.projects[projectId] ?? null;
+  }
+
+  function getOrchestratorSessionId(projectId: string): string | null {
+    const project = getProjectConfig(projectId);
+    return project ? `${project.sessionPrefix}-orchestrator` : null;
+  }
+
+  async function ensureOrchestratorSession(projectId: string): Promise<Session | null> {
+    const project = getProjectConfig(projectId);
+    if (!project) return null;
+
+    const orchestratorSessionId = `${project.sessionPrefix}-orchestrator`;
+    const existing = await sessionManager.get(orchestratorSessionId);
+    if (existing) {
+      return existing;
+    }
+
+    return sessionManager.spawnOrchestrator({
+      projectId,
+      systemPrompt: generateOrchestratorPrompt({ config, projectId, project }),
+    });
+  }
+
+  function buildOrchestratorReactionMessage(opts: {
+    projectId: string;
+    sourceSessionId: SessionId;
+    sourceSession: Session | null;
+    reactionKey: string;
+    reactionConfig: ReactionConfig;
+    failureReason?: string;
+    escalationReason?: string;
+  }): string {
+    const { projectId, sourceSessionId, sourceSession, reactionKey, reactionConfig } = opts;
+    const lines = [
+      "A lifecycle reaction needs orchestrator attention.",
+      `Project: ${projectId}`,
+      `Session: ${sourceSessionId}`,
+      `Trigger: ${reactionKey}`,
+    ];
+
+    if (sourceSession?.status) {
+      lines.push(`Status: ${sourceSession.status}`);
+    }
+    if (sourceSession?.branch) {
+      lines.push(`Branch: ${sourceSession.branch}`);
+    }
+    if (sourceSession?.issueId) {
+      lines.push(`Issue: ${sourceSession.issueId}`);
+    }
+    if (sourceSession?.pr?.url) {
+      lines.push(`PR: ${sourceSession.pr.url}`);
+    }
+    if (opts.failureReason) {
+      lines.push(`Failure: ${opts.failureReason}`);
+    }
+    if (opts.escalationReason) {
+      lines.push(`Escalation: ${opts.escalationReason}`);
+    }
+    if (reactionConfig.message) {
+      lines.push(`Original instruction: ${reactionConfig.message}`);
+    }
+
+    lines.push("");
+    lines.push(
+      "Inspect the current state and decide how to keep delivery moving without handing routine coordination back to the human.",
+    );
+    lines.push(
+      "Choose whether to restore the existing worker, continue with it, or spawn/redirect a successor worker and claim the PR if ownership is missing.",
+    );
+    lines.push(
+      "Escalate to a human only if the next step requires product judgment, credentials, or environment intervention that the system cannot resolve on its own.",
+    );
+
+    return lines.join("\n");
+  }
+
+  async function routeReactionToOrchestrator(opts: {
+    sessionId: SessionId;
+    projectId: string;
+    reactionKey: string;
+    reactionConfig: ReactionConfig;
+    failureReason?: string;
+    escalationReason?: string;
+  }): Promise<ReactionResult | null> {
+    const orchestratorSessionId = getOrchestratorSessionId(opts.projectId);
+    if (!orchestratorSessionId) return null;
+
+    try {
+      const sourceSession =
+        opts.sessionId === "system"
+          ? null
+          : await sessionManager.get(opts.sessionId).catch(() => null);
+      if (sourceSession && isOrchestratorSession(sourceSession)) {
+        return null;
+      }
+
+      const orchestrator = await ensureOrchestratorSession(opts.projectId);
+      if (!orchestrator || orchestrator.id === opts.sessionId) {
+        return null;
+      }
+
+      const message = buildOrchestratorReactionMessage({
+        projectId: opts.projectId,
+        sourceSessionId: opts.sessionId,
+        sourceSession,
+        reactionKey: opts.reactionKey,
+        reactionConfig: opts.reactionConfig,
+        failureReason: opts.failureReason,
+        escalationReason: opts.escalationReason,
+      });
+
+      await sessionManager.send(orchestrator.id, message);
+      return {
+        reactionType: opts.reactionKey,
+        success: true,
+        action: "send-to-orchestrator",
+        message,
+        escalated: true,
+      };
+    } catch {
+      return null;
+    }
   }
 
   function updateSessionMetadata(session: Session, updates: Partial<Record<string, string>>): void {

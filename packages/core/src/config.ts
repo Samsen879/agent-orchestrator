@@ -52,11 +52,14 @@ function inferScmPlugin(project: {
 
 const ReactionConfigSchema = z.object({
   auto: z.boolean().default(true),
-  action: z.enum(["send-to-agent", "notify", "auto-merge"]).default("notify"),
+  action: z
+    .enum(["send-to-agent", "send-to-orchestrator", "notify", "auto-merge"])
+    .default("notify"),
   message: z.string().optional(),
   priority: z.enum(["urgent", "action", "warning", "info"]).optional(),
   retries: z.number().optional(),
   escalateAfter: z.union([z.number(), z.string()]).optional(),
+  escalateTo: z.enum(["human", "orchestrator"]).optional(),
   threshold: z.string().optional(),
   includeSummary: z.boolean().optional(),
 });
@@ -316,6 +319,7 @@ function applyDefaultReactions(config: OrchestratorConfig): OrchestratorConfig {
         "CI is failing on your PR. Run `gh pr checks` to see the failures, fix them, and push.",
       retries: 2,
       escalateAfter: 2,
+      escalateTo: "orchestrator",
     },
     "changes-requested": {
       auto: true,
@@ -323,18 +327,21 @@ function applyDefaultReactions(config: OrchestratorConfig): OrchestratorConfig {
       message:
         "There are review comments on your PR. Check with `gh pr view --comments` and `gh api` for inline comments. Address each one, push fixes, and reply.",
       escalateAfter: "30m",
+      escalateTo: "orchestrator",
     },
     "bugbot-comments": {
       auto: true,
       action: "send-to-agent",
       message: "Automated review comments found on your PR. Fix the issues flagged by the bot.",
       escalateAfter: "30m",
+      escalateTo: "orchestrator",
     },
     "merge-conflicts": {
       auto: true,
       action: "send-to-agent",
       message: "Your branch has merge conflicts. Rebase on the default branch and resolve them.",
       escalateAfter: "15m",
+      escalateTo: "orchestrator",
     },
     "approved-and-green": {
       auto: false,
@@ -346,24 +353,31 @@ function applyDefaultReactions(config: OrchestratorConfig): OrchestratorConfig {
       auto: true,
       action: "send-to-agent",
       message:
-        "You appear to be idle. If your task is not complete, continue working — write the code, commit, push, and create a PR. If you are blocked, explain what is blocking you.",
+        "You appear to be idle. If you are the orchestrator, continue monitoring the execution chain, workers, PRs, CI, review backlog, and ownership continuity without waiting for human input. If you are a worker and your task is not complete, continue working — write the code, verify it, push updates, and keep the PR moving. If you are blocked, explain what is blocking you.",
       retries: 2,
       escalateAfter: "15m",
+      escalateTo: "orchestrator",
     },
     "agent-stuck": {
       auto: true,
-      action: "notify",
-      priority: "urgent",
+      action: "send-to-orchestrator",
+      message:
+        "A worker appears stuck. Inspect it and decide whether to restore the current worker or hand the task to a successor worker.",
       threshold: "10m",
+      priority: "urgent",
     },
     "agent-needs-input": {
       auto: true,
-      action: "notify",
+      action: "send-to-orchestrator",
+      message:
+        "A worker asked for input. Inspect the situation and decide whether you can resolve it autonomously or must escalate to a human.",
       priority: "urgent",
     },
     "agent-exited": {
       auto: true,
-      action: "notify",
+      action: "send-to-orchestrator",
+      message:
+        "A worker exited unexpectedly. Inspect the task and decide whether to restore the worker or continue with a successor worker.",
       priority: "urgent",
     },
     "all-complete": {
