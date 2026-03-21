@@ -861,6 +861,9 @@ export interface ReactionConfig {
   /** Where escalation should be routed once automation can no longer continue normally */
   escalateTo?: "human" | "orchestrator";
 
+  /** Re-trigger the reaction while the underlying status remains unchanged */
+  repeatEvery?: number | string;
+
   /** Threshold duration for time-based triggers (e.g. "10m" for stuck detection) */
   threshold?: string;
 

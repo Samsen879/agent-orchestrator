@@ -60,6 +60,7 @@ const ReactionConfigSchema = z.object({
   retries: z.number().optional(),
   escalateAfter: z.union([z.number(), z.string()]).optional(),
   escalateTo: z.enum(["human", "orchestrator"]).optional(),
+  repeatEvery: z.union([z.number(), z.string()]).optional(),
   threshold: z.string().optional(),
   includeSummary: z.boolean().optional(),
 });
@@ -355,6 +356,7 @@ function applyDefaultReactions(config: OrchestratorConfig): OrchestratorConfig {
       message:
         "You appear to be idle. If you are the orchestrator, continue monitoring the execution chain, workers, PRs, CI, review backlog, and ownership continuity without waiting for human input. If you are a worker and your task is not complete, continue working — write the code, verify it, push updates, and keep the PR moving. If you are blocked, explain what is blocking you.",
       retries: 2,
+      repeatEvery: "30s",
       escalateAfter: "15m",
       escalateTo: "orchestrator",
     },

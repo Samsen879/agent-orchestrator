@@ -1348,6 +1348,88 @@ describe("reactions", () => {
     );
   });
 
+  it("repeats idle nudges for sustained idle sessions after repeatEvery without burning retry escalation", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-22T00:30:00.000Z"));
+
+    const mockNotifier: Notifier = {
+      name: "mock-notifier",
+      notify: vi.fn().mockResolvedValue(undefined),
+    };
+    const registryWithNotifier: PluginRegistry = {
+      ...mockRegistry,
+      get: vi.fn().mockImplementation((slot: string, name: string) => {
+        if (slot === "runtime") return mockRuntime;
+        if (slot === "agent") return mockAgent;
+        if (slot === "notifier" && name === "desktop") return mockNotifier;
+        return null;
+      }),
+    };
+
+    config.reactions = {
+      "agent-idle": {
+        auto: true,
+        action: "send-to-agent",
+        message: "Keep coordinating.",
+        retries: 1,
+        escalateAfter: "15m",
+        escalateTo: "orchestrator",
+        repeatEvery: "30s",
+      },
+    };
+
+    vi.mocked(mockAgent.getActivityState).mockResolvedValue({
+      state: "idle",
+      timestamp: new Date(Date.now() - 60_000),
+    });
+
+    const session = makeSession({
+      id: "app-orchestrator",
+      status: "idle",
+      branch: "main",
+      issueId: null,
+      metadata: { role: "orchestrator", status: "idle" },
+    });
+    vi.mocked(mockSessionManager.get).mockResolvedValue(session);
+    vi.mocked(mockSessionManager.send).mockResolvedValue(undefined);
+
+    writeMetadata(sessionsDir, "app-orchestrator", {
+      worktree: "/tmp",
+      branch: "main",
+      status: "idle",
+      project: "my-app",
+      role: "orchestrator",
+    });
+
+    const lm = createLifecycleManager({
+      config,
+      registry: registryWithNotifier,
+      sessionManager: mockSessionManager,
+    });
+
+    await lm.check("app-orchestrator");
+    expect(mockSessionManager.send).toHaveBeenCalledTimes(1);
+
+    vi.advanceTimersByTime(29_000);
+    await lm.check("app-orchestrator");
+    expect(mockSessionManager.send).toHaveBeenCalledTimes(1);
+
+    vi.advanceTimersByTime(1_000);
+    await lm.check("app-orchestrator");
+    expect(mockSessionManager.send).toHaveBeenCalledTimes(2);
+
+    vi.advanceTimersByTime(30_000);
+    await lm.check("app-orchestrator");
+    expect(mockSessionManager.send).toHaveBeenCalledTimes(3);
+
+    vi.advanceTimersByTime(30_000);
+    await lm.check("app-orchestrator");
+    expect(mockSessionManager.send).toHaveBeenCalledTimes(4);
+    expect(mockNotifier.notify).not.toHaveBeenCalled();
+
+    vi.useRealTimers();
+  });
+
   it("routes send-to-orchestrator reactions to the orchestrator session", async () => {
     config.reactions = {
       "agent-stuck": {

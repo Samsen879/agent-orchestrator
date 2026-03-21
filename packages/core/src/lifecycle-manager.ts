@@ -192,6 +192,7 @@ export interface LifecycleManagerDeps {
 interface ReactionTracker {
   attempts: number;
   firstTriggered: Date;
+  lastTriggered: Date;
 }
 
 /** Create a LifecycleManager instance. */
@@ -214,6 +215,16 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     if (stuckThresholdMs <= 0) return false;
     const idleMs = Date.now() - idleTimestamp.getTime();
     return idleMs > stuckThresholdMs;
+  }
+
+  function parseRepeatInterval(value: number | string | undefined): number {
+    if (typeof value === "number") {
+      return Number.isFinite(value) && value > 0 ? value : 0;
+    }
+    if (typeof value === "string") {
+      return parseDuration(value);
+    }
+    return 0;
   }
 
   /** Determine current status for a session by polling plugins. */
@@ -417,35 +428,44 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     projectId: string,
     reactionKey: string,
     reactionConfig: ReactionConfig,
+    options?: {
+      countAttempt?: boolean;
+    },
   ): Promise<ReactionResult> {
     const trackerKey = `${sessionId}:${reactionKey}`;
     let tracker = reactionTrackers.get(trackerKey);
+    const now = new Date();
+    const countAttempt = options?.countAttempt ?? true;
 
     if (!tracker) {
-      tracker = { attempts: 0, firstTriggered: new Date() };
+      tracker = { attempts: 0, firstTriggered: now, lastTriggered: now };
       reactionTrackers.set(trackerKey, tracker);
     }
 
+    tracker.lastTriggered = now;
+
     // Increment attempts before checking escalation
-    tracker.attempts++;
+    if (countAttempt) {
+      tracker.attempts++;
+    }
 
     // Check if we should escalate
     const maxRetries = reactionConfig.retries ?? Infinity;
     const escalateAfter = reactionConfig.escalateAfter;
     let shouldEscalate = false;
 
-    if (tracker.attempts > maxRetries) {
+    if (countAttempt && tracker.attempts > maxRetries) {
       shouldEscalate = true;
     }
 
     if (typeof escalateAfter === "string") {
       const durationMs = parseDuration(escalateAfter);
-      if (durationMs > 0 && Date.now() - tracker.firstTriggered.getTime() > durationMs) {
+      if (durationMs > 0 && now.getTime() - tracker.firstTriggered.getTime() > durationMs) {
         shouldEscalate = true;
       }
     }
 
-    if (typeof escalateAfter === "number" && tracker.attempts > escalateAfter) {
+    if (typeof escalateAfter === "number" && countAttempt && tracker.attempts > escalateAfter) {
       shouldEscalate = true;
     }
 
@@ -501,6 +521,15 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
               escalated: false,
             };
           } catch (err) {
+            if (!countAttempt) {
+              tracker.attempts++;
+            }
+            if (tracker.attempts > maxRetries) {
+              return escalateReaction(
+                `Reaction '${reactionKey}' exceeded its retry or escalation threshold.`,
+              );
+            }
+
             if (reactionConfig.escalateTo === "orchestrator") {
               const routed = await routeReactionToOrchestrator({
                 sessionId,
@@ -960,6 +989,36 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     }
   }
 
+  async function maybeRepeatUnchangedReaction(
+    session: Session,
+    status: SessionStatus,
+  ): Promise<void> {
+    const eventType = statusToEventType(undefined, status);
+    if (!eventType) return;
+
+    const reactionKey = eventToReactionKey(eventType);
+    if (!reactionKey) return;
+
+    const reactionConfig = getReactionConfigForSession(session, reactionKey);
+    if (!reactionConfig?.action) return;
+    if (reactionConfig.auto === false && reactionConfig.action !== "notify") return;
+    if (reactionConfig.action !== "send-to-agent" && reactionConfig.action !== "send-to-orchestrator") {
+      return;
+    }
+
+    const repeatEveryMs = parseRepeatInterval(reactionConfig.repeatEvery);
+    if (repeatEveryMs <= 0) return;
+
+    const tracker = reactionTrackers.get(`${session.id}:${reactionKey}`);
+    if (tracker && Date.now() - tracker.lastTriggered.getTime() < repeatEveryMs) {
+      return;
+    }
+
+    await executeReaction(session.id, session.projectId, reactionKey, reactionConfig, {
+      countAttempt: false,
+    });
+  }
+
   /** Poll a single session and handle state transitions. */
   async function checkSession(session: Session): Promise<void> {
     // Use tracked state if available; otherwise use the persisted metadata status
@@ -1046,6 +1105,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     } else {
       // No transition but track current state
       states.set(session.id, newStatus);
+      await maybeRepeatUnchangedReaction(session, newStatus);
     }
 
     await maybeDispatchReviewBacklog(session, oldStatus, newStatus, transitionReaction);

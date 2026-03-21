@@ -601,6 +601,12 @@ describe("Config Defaults", () => {
               message: "Fix CI.",
               escalateTo: "orchestrator",
             },
+            "agent-idle": {
+              auto: true,
+              action: "send-to-agent",
+              message: "Keep moving.",
+              repeatEvery: "45s",
+            },
           },
         },
       },
@@ -608,6 +614,7 @@ describe("Config Defaults", () => {
 
     expect(validated.projects.proj1.reactions?.["agent-stuck"]?.action).toBe("send-to-orchestrator");
     expect(validated.projects.proj1.reactions?.["ci-failed"]?.escalateTo).toBe("orchestrator");
+    expect(validated.projects.proj1.reactions?.["agent-idle"]?.repeatEvery).toBe("45s");
   });
 
   it("routes worker interruption defaults to the orchestrator", () => {
@@ -629,5 +636,6 @@ describe("Config Defaults", () => {
     expect(validated.reactions["bugbot-comments"]?.escalateTo).toBe("orchestrator");
     expect(validated.reactions["merge-conflicts"]?.escalateTo).toBe("orchestrator");
     expect(validated.reactions["agent-idle"]?.escalateTo).toBe("orchestrator");
+    expect(validated.reactions["agent-idle"]?.repeatEvery).toBe("30s");
   });
 });
