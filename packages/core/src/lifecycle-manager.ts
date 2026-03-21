@@ -13,6 +13,7 @@
 import { randomUUID } from "node:crypto";
 import {
   SESSION_STATUS,
+  TERMINAL_STATUSES,
   PR_STATE,
   CI_STATUS,
   type LifecycleManager,
@@ -225,6 +226,22 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
       return parseDuration(value);
     }
     return 0;
+  }
+
+  function getTrackedStatus(session: Session): SessionStatus {
+    return (
+      states.get(session.id) ??
+      ((session.metadata?.["status"] as SessionStatus | undefined) || session.status)
+    );
+  }
+
+  async function hasActionableNonOrchestratorSessions(projectId: string, excludeSessionId?: string): Promise<boolean> {
+    const projectSessions = await sessionManager.list(projectId);
+    return projectSessions.some((candidate) => {
+      if (candidate.id === excludeSessionId) return false;
+      if (isOrchestratorSession(candidate)) return false;
+      return !TERMINAL_STATUSES.has(getTrackedStatus(candidate));
+    });
   }
 
   /** Determine current status for a session by polling plugins. */
@@ -993,6 +1010,15 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     session: Session,
     status: SessionStatus,
   ): Promise<void> {
+    if (
+      status === "idle" &&
+      isOrchestratorSession(session) &&
+      !(await hasActionableNonOrchestratorSessions(session.projectId, session.id))
+    ) {
+      clearReactionTracker(session.id, "agent-idle");
+      return;
+    }
+
     const eventType = statusToEventType(undefined, status);
     if (!eventType) return;
 
@@ -1063,6 +1089,17 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
       // Handle transition: notify humans and/or trigger reactions
       const eventType = statusToEventType(oldStatus, newStatus);
       if (eventType) {
+        const suppressIdleOrchestratorReaction =
+          eventType === "session.idle" &&
+          isOrchestratorSession(session) &&
+          !(await hasActionableNonOrchestratorSessions(session.projectId, session.id));
+
+        if (suppressIdleOrchestratorReaction) {
+          clearReactionTracker(session.id, "agent-idle");
+          await maybeDispatchReviewBacklog(session, oldStatus, newStatus, transitionReaction);
+          return;
+        }
+
         let reactionHandledNotify = false;
         const reactionKey = eventToReactionKey(eventType);
 
@@ -1149,9 +1186,12 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
         }
       }
 
-      // Check if all sessions are complete (trigger reaction only once)
-      const activeSessions = sessions.filter((s) => s.status !== "merged" && s.status !== "killed");
-      if (sessions.length > 0 && activeSessions.length === 0 && !allCompleteEmitted) {
+      // Check if all non-orchestrator work is complete (trigger reaction only once)
+      const actionableSessions = sessions.filter((s) => {
+        if (isOrchestratorSession(s)) return false;
+        return !TERMINAL_STATUSES.has(getTrackedStatus(s));
+      });
+      if (sessions.length > 0 && actionableSessions.length === 0 && !allCompleteEmitted) {
         allCompleteEmitted = true;
 
         // Execute all-complete reaction if configured
@@ -1173,7 +1213,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
           correlationId,
           projectId: scopedProjectId,
           durationMs: Date.now() - startedAt,
-          data: { sessionCount: sessions.length, activeSessionCount: activeSessions.length },
+          data: { sessionCount: sessions.length, activeSessionCount: actionableSessions.length },
           level: "info",
         });
         observer.setHealth({
@@ -1184,7 +1224,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
           details: {
             projectId: scopedProjectId,
             sessionCount: sessions.length,
-            activeSessionCount: activeSessions.length,
+            activeSessionCount: actionableSessions.length,
           },
         });
       }

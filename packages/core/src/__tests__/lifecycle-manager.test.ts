@@ -1332,6 +1332,14 @@ describe("reactions", () => {
       project: "my-app",
       role: "orchestrator",
     });
+    vi.mocked(mockSessionManager.list).mockResolvedValue([
+      session,
+      makeSession({
+        id: "app-2",
+        status: "working",
+        metadata: { role: "worker" },
+      }),
+    ]);
 
     const lm = createLifecycleManager({
       config,
@@ -1391,6 +1399,14 @@ describe("reactions", () => {
       metadata: { role: "orchestrator", status: "idle" },
     });
     vi.mocked(mockSessionManager.get).mockResolvedValue(session);
+    vi.mocked(mockSessionManager.list).mockResolvedValue([
+      session,
+      makeSession({
+        id: "app-2",
+        status: "working",
+        metadata: { role: "worker" },
+      }),
+    ]);
     vi.mocked(mockSessionManager.send).mockResolvedValue(undefined);
 
     writeMetadata(sessionsDir, "app-orchestrator", {
@@ -1428,6 +1444,63 @@ describe("reactions", () => {
     expect(mockNotifier.notify).not.toHaveBeenCalled();
 
     vi.useRealTimers();
+  });
+
+  it("does not re-nudge an idle orchestrator when no actionable worker sessions remain", async () => {
+    config.reactions = {
+      "agent-idle": {
+        auto: true,
+        action: "send-to-agent",
+        message: "Keep coordinating.",
+        repeatEvery: "30s",
+      },
+    };
+
+    vi.mocked(mockAgent.getActivityState).mockResolvedValue({
+      state: "idle",
+      timestamp: new Date(Date.now() - 60_000),
+    });
+
+    const orchestrator = makeSession({
+      id: "app-orchestrator",
+      status: "working",
+      branch: "main",
+      issueId: null,
+      metadata: { role: "orchestrator", status: "working" },
+    });
+    vi.mocked(mockSessionManager.get).mockResolvedValue(orchestrator);
+    vi.mocked(mockSessionManager.list).mockResolvedValue([
+      orchestrator,
+      makeSession({
+        id: "app-2",
+        status: "merged",
+        metadata: { role: "worker", status: "merged" },
+      }),
+      makeSession({
+        id: "app-3",
+        status: "killed",
+        metadata: { role: "worker", status: "killed" },
+      }),
+    ]);
+
+    writeMetadata(sessionsDir, "app-orchestrator", {
+      worktree: "/tmp",
+      branch: "main",
+      status: "working",
+      project: "my-app",
+      role: "orchestrator",
+    });
+
+    const lm = createLifecycleManager({
+      config,
+      registry: mockRegistry,
+      sessionManager: mockSessionManager,
+    });
+
+    await lm.check("app-orchestrator");
+
+    expect(lm.getStates().get("app-orchestrator")).toBe("idle");
+    expect(mockSessionManager.send).not.toHaveBeenCalled();
   });
 
   it("routes send-to-orchestrator reactions to the orchestrator session", async () => {
