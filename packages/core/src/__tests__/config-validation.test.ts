@@ -636,6 +636,6 @@ describe("Config Defaults", () => {
     expect(validated.reactions["bugbot-comments"]?.escalateTo).toBe("orchestrator");
     expect(validated.reactions["merge-conflicts"]?.escalateTo).toBe("orchestrator");
     expect(validated.reactions["agent-idle"]?.escalateTo).toBe("orchestrator");
-    expect(validated.reactions["agent-idle"]?.repeatEvery).toBe("30s");
+    expect(validated.reactions["agent-idle"]?.repeatEvery).toBe("8m");
   });
 });
