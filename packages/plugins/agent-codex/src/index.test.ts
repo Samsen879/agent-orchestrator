@@ -472,9 +472,19 @@ describe("isProcessRunning", () => {
     expect(mockExecFileAsync).not.toHaveBeenCalled();
   });
 
-  it("returns false on tmux command failure", async () => {
-    mockExecFileAsync.mockRejectedValue(new Error("tmux not running"));
+  it("returns false when tmux session is missing", async () => {
+    mockExecFileAsync.mockRejectedValue(new Error("can't find session: test-session"));
     expect(await agent.isProcessRunning(makeTmuxHandle())).toBe(false);
+  });
+
+  it("throws when tmux process lookup cannot access the socket", async () => {
+    mockExecFileAsync.mockRejectedValue(
+      new Error("error connecting to /tmp/tmux-1000/default (Operation not permitted)"),
+    );
+
+    await expect(agent.isProcessRunning(makeTmuxHandle())).rejects.toThrow(
+      "Operation not permitted",
+    );
   });
 
   it("returns true when PID exists but throws EPERM", async () => {
@@ -623,12 +633,21 @@ describe("getActivityState", () => {
     expect(result?.timestamp).toBeInstanceOf(Date);
   });
 
-  it("returns exited when process is not running", async () => {
-    mockExecFileAsync.mockRejectedValue(new Error("tmux not running"));
+  it("returns exited when codex process is not running in the tmux session", async () => {
+    mockTmuxWithProcess("codex", false);
     const session = makeSession({ runtimeHandle: makeTmuxHandle() });
     const result = await agent.getActivityState(session);
     expect(result?.state).toBe("exited");
     expect(result?.timestamp).toBeInstanceOf(Date);
+  });
+
+  it("throws when tmux process liveness cannot be checked", async () => {
+    mockExecFileAsync.mockRejectedValue(
+      new Error("error connecting to /tmp/tmux-1000/default (Operation not permitted)"),
+    );
+    const session = makeSession({ runtimeHandle: makeTmuxHandle() });
+
+    await expect(agent.getActivityState(session)).rejects.toThrow("Operation not permitted");
   });
 
   it("returns null when process is running but no workspacePath", async () => {

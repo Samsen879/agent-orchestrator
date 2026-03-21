@@ -481,7 +481,7 @@ describe("runtime.isAlive()", () => {
     );
   });
 
-  it("returns false when has-session fails", async () => {
+  it("returns false when has-session reports a missing session", async () => {
     const runtime = create();
     const handle = makeHandle("dead-test");
 
@@ -490,6 +490,15 @@ describe("runtime.isAlive()", () => {
     const alive = await runtime.isAlive(handle);
 
     expect(alive).toBe(false);
+  });
+
+  it("throws when has-session fails because tmux liveness cannot be checked", async () => {
+    const runtime = create();
+    const handle = makeHandle("permission-test");
+
+    mockTmuxError("error connecting to /tmp/tmux-1000/default (Operation not permitted)");
+
+    await expect(runtime.isAlive(handle)).rejects.toThrow("Operation not permitted");
   });
 });
 

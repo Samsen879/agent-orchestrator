@@ -16,6 +16,7 @@ import type {
 
 const execFileAsync = promisify(execFile);
 const TMUX_COMMAND_TIMEOUT_MS = 5_000;
+const MISSING_SESSION_PATTERNS = [/can't find session/i, /session not found/i, /no such session/i];
 
 export const manifest = {
   name: "tmux",
@@ -31,6 +32,21 @@ function assertValidSessionId(id: string): void {
   if (!SAFE_SESSION_ID.test(id)) {
     throw new Error(`Invalid session ID "${id}": must match ${SAFE_SESSION_ID}`);
   }
+}
+
+function getErrorText(error: unknown): string {
+  if (error instanceof Error) {
+    const stderr =
+      "stderr" in error && typeof error.stderr === "string" ? error.stderr : "";
+    return `${error.message}\n${stderr}`;
+  }
+
+  return String(error);
+}
+
+function isMissingSessionError(error: unknown): boolean {
+  const errorText = getErrorText(error);
+  return MISSING_SESSION_PATTERNS.some((pattern) => pattern.test(errorText));
 }
 
 /** Run a tmux command and return stdout */
@@ -162,8 +178,12 @@ export function create(): Runtime {
       try {
         await tmux("has-session", "-t", handle.id);
         return true;
-      } catch {
-        return false;
+      } catch (error) {
+        if (isMissingSessionError(error)) {
+          return false;
+        }
+
+        throw error;
       }
     },
 

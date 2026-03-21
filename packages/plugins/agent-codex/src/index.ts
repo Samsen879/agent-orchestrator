@@ -23,6 +23,7 @@ import { promisify } from "node:util";
 import { randomBytes } from "node:crypto";
 
 const execFileAsync = promisify(execFile);
+const MISSING_TMUX_SESSION_PATTERNS = [/can't find session/i, /session not found/i, /no such session/i];
 
 function normalizePermissionMode(mode: string | undefined): "permissionless" | "default" | "auto-edit" | "suggest" | undefined {
   if (!mode) return undefined;
@@ -71,6 +72,21 @@ export const manifest = {
   version: "0.1.1",
   displayName: "OpenAI Codex",
 };
+
+function getErrorText(error: unknown): string {
+  if (error instanceof Error) {
+    const stderr =
+      "stderr" in error && typeof error.stderr === "string" ? error.stderr : "";
+    return `${error.message}\n${stderr}`;
+  }
+
+  return String(error);
+}
+
+function isMissingTmuxSessionError(error: unknown): boolean {
+  const errorText = getErrorText(error);
+  return MISSING_TMUX_SESSION_PATTERNS.some((pattern) => pattern.test(errorText));
+}
 
 // =============================================================================
 // Shell Wrappers (automatic metadata updates — like Claude Code's PostToolUse)
@@ -718,8 +734,8 @@ function createCodexAgent(): Agent {
     },
 
     async isProcessRunning(handle: RuntimeHandle): Promise<boolean> {
-      try {
-        if (handle.runtimeName === "tmux" && handle.id) {
+      if (handle.runtimeName === "tmux" && handle.id) {
+        try {
           const { stdout: ttyOut } = await execFileAsync(
             "tmux",
             ["list-panes", "-t", handle.id, "-F", "#{pane_tty}"],
@@ -746,26 +762,31 @@ function createCodexAgent(): Agent {
             }
           }
           return false;
-        }
-
-        const rawPid = handle.data["pid"];
-        const pid = typeof rawPid === "number" ? rawPid : Number(rawPid);
-        if (Number.isFinite(pid) && pid > 0) {
-          try {
-            process.kill(pid, 0);
-            return true;
-          } catch (err: unknown) {
-            if (err instanceof Error && "code" in err && err.code === "EPERM") {
-              return true;
-            }
+        } catch (error) {
+          if (isMissingTmuxSessionError(error)) {
             return false;
           }
-        }
 
-        return false;
-      } catch {
+          throw error;
+        }
+      }
+
+      const rawPid = handle.data["pid"];
+      const pid = typeof rawPid === "number" ? rawPid : Number(rawPid);
+      if (Number.isFinite(pid) && pid > 0) {
+        try {
+          process.kill(pid, 0);
+          return true;
+        } catch (err: unknown) {
+          if (err instanceof Error && "code" in err && err.code === "EPERM") {
+            return true;
+          }
+          return false;
+        }
         return false;
       }
+
+      return false;
     },
 
     async getSessionInfo(session: Session): Promise<AgentSessionInfo | null> {
