@@ -20,6 +20,7 @@ const VALID_STATUSES: ReadonlySet<string> = new Set([
   "stuck",
   "errored",
   "killed",
+  "idle",
   "done",
   "terminated",
 ]);

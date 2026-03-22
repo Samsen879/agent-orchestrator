@@ -1271,6 +1271,24 @@ describe("list", () => {
     expect(repaired!["status"]).toBe("working");
   });
 
+  it("preserves idle metadata status instead of coercing it to spawning", async () => {
+    writeMetadata(sessionsDir, "app-orchestrator", {
+      worktree: config.projects["my-app"]!.path,
+      branch: "main",
+      status: "idle",
+      project: "my-app",
+      role: "orchestrator",
+      runtimeHandle: JSON.stringify(makeHandle("rt-orch")),
+    });
+
+    const sm = createSessionManager({ config, registry: mockRegistry });
+    const sessions = await sm.list("my-app");
+    const orchestrator = sessions.find((session) => session.id === "app-orchestrator");
+
+    expect(orchestrator).toBeDefined();
+    expect(orchestrator!.status).toBe("idle");
+  });
+
   it("filters by project ID", async () => {
     // In hash-based architecture, each project has its own directory
     // so filtering is implicit. This test verifies list(projectId) only
