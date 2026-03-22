@@ -2546,6 +2546,51 @@ describe("send", () => {
     expect(mockRuntime.sendMessage).toHaveBeenCalled();
   });
 
+  it("delivers long codex tmux messages via file indirection to avoid paste corruption", async () => {
+    const longMessage = `Line 1\n${"x".repeat(1500)}\nLine 3`;
+    const mockCodexAgent: Agent = {
+      ...mockAgent,
+      name: "codex",
+      processName: "codex",
+    };
+    const registryWithCodexTmux: PluginRegistry = {
+      ...mockRegistry,
+      get: vi.fn().mockImplementation((slot: string, name: string) => {
+        if (slot === "runtime" && name === "tmux") return mockRuntime;
+        if (slot === "agent" && name === "codex") return mockCodexAgent;
+        if (slot === "workspace") return mockWorkspace;
+        return null;
+      }),
+    };
+    const tmuxHandle = { id: "rt-1", runtimeName: "tmux", data: {} };
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "main",
+      status: "working",
+      project: "my-app",
+      agent: "codex",
+      runtimeHandle: JSON.stringify(tmuxHandle),
+    });
+    vi.mocked(mockRuntime.getOutput).mockResolvedValueOnce("before").mockResolvedValueOnce("after");
+
+    const sm = createSessionManager({ config, registry: registryWithCodexTmux });
+    await sm.send("app-1", longMessage);
+
+    expect(mockRuntime.sendMessage).toHaveBeenCalledTimes(1);
+    const deliveredMessage = vi.mocked(mockRuntime.sendMessage).mock.calls[0]?.[1];
+    expect(deliveredMessage).toContain("AO note:");
+    expect(deliveredMessage).toContain("Read ");
+    expect(deliveredMessage).toContain("continue from that file.");
+    expect(deliveredMessage).not.toContain(longMessage);
+
+    const match = deliveredMessage?.match(/Read (\S+) and continue from that file\./);
+    expect(match?.[1]).toBeTruthy();
+
+    const filePath = match?.[1] as string;
+    expect(readFileSync(filePath, "utf-8")).toBe(longMessage);
+  });
+
   it("throws for nonexistent session", async () => {
     const sm = createSessionManager({ config, registry: mockRegistry });
     await expect(sm.send("nope", "hello")).rejects.toThrow("not found");

@@ -13,6 +13,7 @@
 
 import { statSync, existsSync, readdirSync, writeFileSync, mkdirSync, utimesSync } from "node:fs";
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { basename, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { promisify } from "node:util";
@@ -223,9 +224,41 @@ const SEND_CONFIRMATION_POLL_MS = 500;
 const SEND_CONFIRMATION_OUTPUT_LINES = 20;
 const SEND_BOOTSTRAP_READY_TIMEOUT_MS = 20_000;
 const SEND_BOOTSTRAP_STABLE_POLLS = 2;
+const FILE_BACKED_CODEX_SEND_THRESHOLD = 200;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function shouldUseFileBackedCodexSend(
+  agentName: string,
+  runtimeName: string,
+  message: string,
+): boolean {
+  return (
+    agentName === "codex" &&
+    runtimeName === "tmux" &&
+    (message.includes("\n") || message.length > FILE_BACKED_CODEX_SEND_THRESHOLD)
+  );
+}
+
+function writeInteractiveDeliveryFile(
+  configPath: string,
+  projectPath: string,
+  sessionId: string,
+  message: string,
+): string {
+  const baseDir = getProjectBaseDir(configPath, projectPath);
+  const messagesDir = join(baseDir, "interactive-messages");
+  mkdirSync(messagesDir, { recursive: true });
+
+  const filePath = join(messagesDir, `${sessionId}-${randomUUID().slice(0, 8)}.md`);
+  writeFileSync(filePath, message, { encoding: "utf-8", mode: 0o600 });
+  return filePath;
+}
+
+function buildFileBackedCodexNotice(filePath: string): string {
+  return `AO note: Read ${filePath} and continue from that file.`;
 }
 
 async function getTmuxForegroundCommand(sessionName: string): Promise<string | null> {
@@ -2008,11 +2041,17 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
         throw new Error(`Session ${sessionId} has no runtime handle`);
       }
 
+      const deliveryMessage = shouldUseFileBackedCodexSend(agentName, handle.runtimeName, message)
+        ? buildFileBackedCodexNotice(
+            writeInteractiveDeliveryFile(config.configPath, project.path, sessionId, message),
+          )
+        : message;
+
       const baselineOutput = await captureOutput(handle);
       const baselineActivity = detectActivityFromOutput(baselineOutput) ?? session.activity;
       const baselineUpdatedAt = await getOpenCodeSessionUpdatedAt();
 
-      await runtimePlugin.sendMessage(handle, message);
+      await runtimePlugin.sendMessage(handle, deliveryMessage);
 
       for (let attempt = 1; attempt <= SEND_CONFIRMATION_ATTEMPTS; attempt++) {
         // Sleep before each check (including the first) so the runtime has time
