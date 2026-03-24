@@ -275,6 +275,21 @@ async function getTmuxForegroundCommand(sessionName: string): Promise<string | n
   }
 }
 
+async function getWorkspaceGitBranch(workspacePath: string | null | undefined): Promise<string | null> {
+  if (!workspacePath) return null;
+
+  try {
+    const { stdout } = await execFileAsync("git", ["branch", "--show-current"], {
+      cwd: workspacePath,
+      timeout: 5_000,
+    });
+    const branch = stdout.trim();
+    return branch.length > 0 ? branch : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Reconstruct a Session object from raw metadata key=value pairs. */
 function metadataToSession(
   sessionId: SessionId,
@@ -826,6 +841,7 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
     session: Session,
     sessionName: string,
     sessionsDir: string,
+    modifiedAt: Date | undefined,
     project: ProjectConfig,
     effectiveAgentName: string,
     plugins: ReturnType<typeof resolvePlugins>,
@@ -838,6 +854,12 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
       effectiveAgentName,
       sessionListPromise,
     );
+
+    const liveBranch = await getWorkspaceGitBranch(session.workspacePath);
+    if (liveBranch && liveBranch !== session.branch) {
+      session.branch = liveBranch;
+      updateMetadataPreservingMtime(sessionsDir, sessionName, { branch: liveBranch }, modifiedAt);
+    }
 
     const tmuxNameFromMetadata = session.metadata["tmuxName"]?.trim();
     const hasTmuxNameFromMetadata =
@@ -1392,6 +1414,8 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
     const launchCommand = plugins.agent.getLaunchCommand(agentLaunchConfig);
     const environment = plugins.agent.getEnvironment(agentLaunchConfig);
 
+    const liveBranch = (await getWorkspaceGitBranch(project.path)) ?? project.defaultBranch;
+
     const handle = await plugins.runtime.create({
       sessionId: tmuxName ?? sessionId,
       workspacePath: project.path,
@@ -1415,7 +1439,7 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
       projectId: orchestratorConfig.projectId,
       status: "working",
       activity: "active",
-      branch: project.defaultBranch,
+      branch: liveBranch,
       issueId: null,
       pr: null,
       workspacePath: project.path,
@@ -1431,7 +1455,7 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
     try {
       writeMetadata(sessionsDir, sessionId, {
         worktree: project.path,
-        branch: project.defaultBranch,
+        branch: liveBranch,
         status: "working",
         role: "orchestrator",
         tmuxName,
@@ -1526,6 +1550,7 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
         session,
         sessionName,
         sessionsDir,
+        modifiedAt,
         project,
         effectiveAgentName,
         plugins,
@@ -1580,6 +1605,7 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
         session,
         sessionId,
         sessionsDir,
+        modifiedAt,
         project,
         effectiveAgentName,
         plugins,

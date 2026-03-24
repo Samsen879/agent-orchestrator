@@ -634,6 +634,25 @@ describe("scm-github plugin", () => {
       expect(checks).toHaveLength(1);
       expect(checks[0]).toMatchObject({ name: "build", status: "passed" });
     });
+
+    it("falls back to statusCheckRollup when gh pr checks does not support --json", async () => {
+      mockGhError("unknown flag: --json");
+      mockGh({
+        statusCheckRollup: [
+          {
+            name: "build",
+            state: "SUCCESS",
+            detailsUrl: "https://ci/1",
+            startedAt: "2025-01-01T00:00:00Z",
+            completedAt: "2025-01-01T00:01:00Z",
+          },
+        ],
+      });
+
+      const checks = await scm.getCIChecks(pr);
+      expect(checks).toHaveLength(1);
+      expect(checks[0]).toMatchObject({ name: "build", status: "passed" });
+    });
   });
 
   // ---- getCISummary ------------------------------------------------------
@@ -668,9 +687,9 @@ describe("scm-github plugin", () => {
       expect(await scm.getCISummary(pr)).toBe("none");
     });
 
-    it('returns "failing" on error (fail-closed)', async () => {
+    it('returns "pending" on error so transient GitHub failures do not masquerade as red CI', async () => {
       mockGhError();
-      expect(await scm.getCISummary(pr)).toBe("failing");
+      expect(await scm.getCISummary(pr)).toBe("pending");
     });
 
     it('returns "none" when all checks are skipped', async () => {
@@ -957,7 +976,7 @@ describe("scm-github plugin", () => {
       mockGh([
         {
           id: 1,
-          user: { login: "cursor[bot]" },
+          user: { login: "chatgpt-codex-connector" },
           body: "Found a potential issue",
           path: "a.ts",
           line: 5,
@@ -979,7 +998,7 @@ describe("scm-github plugin", () => {
 
       const comments = await scm.getAutomatedComments(pr);
       expect(comments).toHaveLength(1);
-      expect(comments[0].botName).toBe("cursor[bot]");
+      expect(comments[0].botName).toBe("chatgpt-codex-connector");
       expect(comments[0].severity).toBe("error"); // "potential issue" → error
     });
 
@@ -1146,7 +1165,7 @@ describe("scm-github plugin", () => {
       expect(result.blockers).toContain("Required checks are failing");
     });
 
-    it("reports UNSTABLE merge state even when CI fetch fails", async () => {
+    it("reports UNSTABLE merge state even when CI fetch is unknown", async () => {
       mockGh({ state: "OPEN" }); // getPRState
       mockGh({
         mergeable: "MERGEABLE",
@@ -1159,7 +1178,7 @@ describe("scm-github plugin", () => {
       const result = await scm.getMergeability(pr);
       expect(result.ciPassing).toBe(false);
       expect(result.mergeable).toBe(false);
-      expect(result.blockers).toContain("CI is failing");
+      expect(result.blockers).toContain("CI is pending");
       expect(result.blockers).toContain("Required checks are failing");
     });
 

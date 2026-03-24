@@ -185,6 +185,39 @@ function installMockGit(remoteBranches: string[]): string {
   return binDir;
 }
 
+function installMockGitWithCurrentBranch(
+  currentBranch: string,
+  remoteBranches: string[] = [],
+): string {
+  const binDir = join(tmpDir, "mock-git-branch-bin");
+  mkdirSync(binDir, { recursive: true });
+  const scriptPath = join(binDir, "git");
+  const refs = remoteBranches
+    .map((branch) => `deadbeef\trefs/heads/${branch}`)
+    .join("\\n")
+    .replace(/'/g, "'\\''");
+  writeFileSync(
+    scriptPath,
+    [
+      "#!/usr/bin/env bash",
+      "set -euo pipefail",
+      'if [[ "$1" == "branch" && "$2" == "--show-current" ]]; then',
+      `  printf '%s\\n' '${currentBranch.replace(/'/g, "'\\''")}'`,
+      "  exit 0",
+      "fi",
+      'if [[ "$1" == "ls-remote" && "$2" == "--heads" && "$3" == "origin" ]]; then',
+      `  printf '%b\\n' '${refs}'`,
+      "  exit 0",
+      "fi",
+      "exit 1",
+      "",
+    ].join("\n"),
+    "utf-8",
+  );
+  chmodSync(scriptPath, 0o755);
+  return binDir;
+}
+
 beforeEach(() => {
   originalPath = process.env.PATH;
   tmpDir = join(tmpdir(), `ao-test-session-mgr-${randomUUID()}`);
@@ -1269,6 +1302,34 @@ describe("list", () => {
     expect(repaired!["pr"]).toBeUndefined();
     expect(repaired!["prAutoDetect"]).toBe("off");
     expect(repaired!["status"]).toBe("working");
+  });
+
+  it("reconciles stale branch metadata from the live workspace without bumping lastActivityAt", async () => {
+    mkdirSync(config.projects["my-app"]!.path, { recursive: true });
+    const mockBin = installMockGitWithCurrentBranch("runtime-post-pilot-0323-2239");
+    process.env.PATH = `${mockBin}:${originalPath ?? ""}`;
+
+    writeMetadata(sessionsDir, "app-orchestrator", {
+      worktree: config.projects["my-app"]!.path,
+      branch: "main",
+      status: "working",
+      role: "orchestrator",
+      project: "my-app",
+      runtimeHandle: JSON.stringify(makeHandle("rt-orch")),
+    });
+
+    const oldTime = new Date("2026-01-02T00:00:00.000Z");
+    utimesSync(join(sessionsDir, "app-orchestrator"), oldTime, oldTime);
+
+    const sm = createSessionManager({ config, registry: mockRegistry });
+    const session = await sm.get("app-orchestrator");
+
+    expect(session).toBeDefined();
+    expect(session!.branch).toBe("runtime-post-pilot-0323-2239");
+    expect(session!.lastActivityAt.getTime()).toBe(oldTime.getTime());
+
+    const repaired = readMetadataRaw(sessionsDir, "app-orchestrator");
+    expect(repaired!["branch"]).toBe("runtime-post-pilot-0323-2239");
   });
 
   it("preserves idle metadata status instead of coercing it to spawning", async () => {
@@ -3036,6 +3097,21 @@ describe("spawnOrchestrator", () => {
     expect(meta!.branch).toBe("main");
     expect(meta!.tmuxName).toBeDefined();
     expect(meta!.runtimeHandle).toBeDefined();
+  });
+
+  it("uses the live project branch when spawning the orchestrator", async () => {
+    mkdirSync(config.projects["my-app"]!.path, { recursive: true });
+    const mockBin = installMockGitWithCurrentBranch("runtime-post-pilot-0323-2239");
+    process.env.PATH = `${mockBin}:${originalPath ?? ""}`;
+
+    const sm = createSessionManager({ config, registry: mockRegistry });
+    const session = await sm.spawnOrchestrator({ projectId: "my-app" });
+
+    expect(session.branch).toBe("runtime-post-pilot-0323-2239");
+
+    const meta = readMetadata(sessionsDir, "app-orchestrator");
+    expect(meta).not.toBeNull();
+    expect(meta!.branch).toBe("runtime-post-pilot-0323-2239");
   });
 
   it("deletes previous OpenCode orchestrator sessions before starting", async () => {

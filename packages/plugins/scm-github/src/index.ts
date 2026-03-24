@@ -38,6 +38,7 @@ const execFileAsync = promisify(execFile);
 
 /** Known bot logins that produce automated review comments */
 const BOT_AUTHORS = new Set([
+  "chatgpt-codex-connector",
   "cursor[bot]",
   "github-actions[bot]",
   "codecov[bot]",
@@ -118,7 +119,10 @@ function prInfoFromView(
 
 function isUnsupportedPrChecksJsonError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
-  return /pr checks/i.test(err.message) && /unknown json field/i.test(err.message);
+  return (
+    /pr checks/i.test(err.message) &&
+    (/unknown json field/i.test(err.message) || /unknown flag:\s*--json/i.test(err.message))
+  );
 }
 
 function mapRawCheckStateToStatus(rawState: string | undefined): CICheck["status"] {
@@ -690,11 +694,12 @@ function createGitHubSCM(): SCM {
           const state = await this.getPRState(pr);
           if (state === "merged" || state === "closed") return "none";
         } catch {
-          // Can't determine state either; fall through to fail-closed.
+          // Can't determine state either; treat CI as still pending instead of
+          // misreporting a transport/API failure as a red PR.
         }
-        // Fail closed for open PRs: report as failing rather than
-        // "none" (which getMergeability treats as passing).
-        return "failing";
+        // For open PRs, an unknown CI state is safer as "pending" than
+        // falsely flipping lifecycle state to ci_failed.
+        return "pending";
       }
       if (checks.length === 0) return "none";
 
