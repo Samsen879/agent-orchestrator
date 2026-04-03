@@ -15,6 +15,10 @@ const STATE_DIR = join(homedir(), ".agent-orchestrator");
 const STATE_FILE = join(STATE_DIR, "running.json");
 const LOCK_FILE = join(STATE_DIR, "running.lock");
 
+type LockAcquireResult =
+  | { release: () => void; error?: never }
+  | { release?: never; error: NodeJS.ErrnoException };
+
 function ensureDir(): void {
   mkdirSync(STATE_DIR, { recursive: true });
 }
@@ -28,16 +32,34 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
-/** Try to create the lockfile atomically. Returns a release function on success, null on failure. */
-function tryAcquire(): (() => void) | null {
+function isLockContentionError(error: NodeJS.ErrnoException): boolean {
+  return error.code === "EEXIST";
+}
+
+function formatLockAccessError(error: NodeJS.ErrnoException): Error {
+  const code = typeof error.code === "string" ? error.code : "UNKNOWN";
+  return new Error(
+    `Cannot access ${LOCK_FILE} (${code}). Check permissions for ${STATE_DIR}.`,
+  );
+}
+
+/**
+ * Try to create the lockfile atomically.
+ * Returns the release function on success, or the original filesystem error on failure.
+ */
+function tryAcquire(): LockAcquireResult {
   try {
     const fd = openSync(LOCK_FILE, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY);
     closeSync(fd);
-    return () => {
+    return {
+      release: () => {
       try { unlinkSync(LOCK_FILE); } catch { /* best effort */ }
+      },
     };
-  } catch {
-    return null;
+  } catch (error) {
+    return {
+      error: error instanceof Error ? (error as NodeJS.ErrnoException) : new Error(String(error)),
+    };
   }
 }
 
@@ -53,14 +75,20 @@ async function acquireLock(timeoutMs = 5000): Promise<() => void> {
   let attempt = 0;
 
   while (true) {
-    const release = tryAcquire();
-    if (release) return release;
+    const result = tryAcquire();
+    if (result.release) return result.release;
+    if (!isLockContentionError(result.error)) {
+      throw formatLockAccessError(result.error);
+    }
 
     if (Date.now() - start > timeoutMs) {
       // Likely stale — remove and make one final atomic attempt.
       try { unlinkSync(LOCK_FILE); } catch { /* ignore */ }
-      const finalRelease = tryAcquire();
-      if (finalRelease) return finalRelease;
+      const finalResult = tryAcquire();
+      if (finalResult.release) return finalResult.release;
+      if (!isLockContentionError(finalResult.error)) {
+        throw formatLockAccessError(finalResult.error);
+      }
       throw new Error("Could not acquire running.json lock");
     }
 
