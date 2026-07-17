@@ -30,6 +30,7 @@ type fakeStore struct {
 	threads  map[string][]domain.PullRequestReviewThread
 	comments map[string][]domain.PullRequestComment
 	waits    map[domain.SessionID]domain.CapacityWait
+	gates    map[domain.SessionID]domain.HumanGate
 	num      int
 }
 
@@ -43,7 +44,12 @@ func newFakeStore() *fakeStore {
 		threads:  map[string][]domain.PullRequestReviewThread{},
 		comments: map[string][]domain.PullRequestComment{},
 		waits:    map[domain.SessionID]domain.CapacityWait{},
+		gates:    map[domain.SessionID]domain.HumanGate{},
 	}
+}
+func (f *fakeStore) GetOpenHumanGateForSession(_ context.Context, id domain.SessionID) (domain.HumanGate, bool, error) {
+	gate, ok := f.gates[id]
+	return gate, ok && gate.Open(), nil
 }
 
 func (f *fakeStore) GetCapacityWait(_ context.Context, id domain.SessionID) (domain.CapacityWait, bool, error) {
@@ -64,6 +70,22 @@ func TestServiceDerivesCapacityWaitStatusFromDurableEpisode(t *testing.T) {
 	}
 	if got.Status != domain.StatusCapacityWait || got.CapacityWait == nil || got.CapacityWait.NextProbeAt != now.Add(time.Minute) || got.CapacityWait.AttemptCount != 2 {
 		t.Fatalf("session = %+v wait=%+v", got, got.CapacityWait)
+	}
+}
+
+func TestServiceDerivesHumanGateStatusForExactGeneration(t *testing.T) {
+	store := newFakeStore()
+	now := time.Date(2026, 7, 17, 8, 0, 0, 0, time.UTC)
+	rec := domain.SessionRecord{ID: "project-1", ProjectID: "project", Activity: domain.Activity{State: domain.ActivityActive, LastActivityAt: now}, Metadata: domain.SessionMetadata{Generation: "g1", ExecutionProfile: domain.ExecutionProfile{Hash: "profile-1"}}}
+	store.sessions[rec.ID] = rec
+	store.gates[rec.ID] = domain.HumanGate{ID: "gate-1", SessionID: rec.ID, SourceGeneration: "g1", ProfileHash: "profile-1", State: domain.GateOpen, DetectedAt: now}
+	service := NewWithDeps(Deps{Store: store, Clock: func() time.Time { return now }})
+	got, err := service.Get(context.Background(), rec.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != domain.StatusHumanGate || got.HumanGate == nil || got.HumanGate.ID != "gate-1" {
+		t.Fatalf("session=%+v gate=%+v", got, got.HumanGate)
 	}
 }
 

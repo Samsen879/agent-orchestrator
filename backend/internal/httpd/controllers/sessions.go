@@ -10,11 +10,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/gate"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apispec"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/envelope"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
@@ -56,11 +58,17 @@ type ActivityRecorder interface {
 	ApplyActivitySignal(ctx context.Context, id domain.SessionID, s ports.ActivitySignal) error
 }
 
+// GateService classifies typed blocked-state signals and persists protected gates.
+type GateService interface {
+	Detect(context.Context, domain.BlockSignal) (gate.Result, error)
+}
+
 // SessionsController owns the session routes. Nil keeps routes registered but
 // returns OpenAPI-backed 501s.
 type SessionsController struct {
 	Svc      SessionService
 	Activity ActivityRecorder
+	Gates    GateService
 }
 
 // Register mounts the session routes on the supplied router.
@@ -83,9 +91,38 @@ func (c *SessionsController) Register(r chi.Router) {
 	r.Post("/sessions/{sessionId}/rollback", c.rollback)
 	r.Post("/sessions/{sessionId}/send", c.send)
 	r.Post("/sessions/{sessionId}/activity", c.activity)
+	r.Post("/sessions/{sessionId}/gates", c.detectGate)
 	r.Get("/orchestrators", c.listOrchestrators)
 	r.Post("/orchestrators", c.spawnOrchestrator)
 	r.Get("/orchestrators/{id}", c.getOrchestrator)
+}
+
+func (c *SessionsController) detectGate(w http.ResponseWriter, r *http.Request) {
+	if c.Gates == nil {
+		apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/{sessionId}/gates")
+		return
+	}
+	var in DetectBlockRequest
+	if err := decodeJSON(r, &in); err != nil {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON", "Invalid JSON body", nil)
+		return
+	}
+	result, err := c.Gates.Detect(r.Context(), domain.BlockSignal{DedupeKey: in.DedupeKey, ProjectID: in.ProjectID, SessionID: sessionID(r), SourceGeneration: in.SourceGeneration,
+		ProfileHash: in.ProfileHash, Reason: in.Reason, RequiredDecision: in.RequiredDecision, Evidence: in.Evidence, AffectedTaskID: in.AffectedTaskID,
+		DependencyEdges: in.DependencyEdges, AllowedActions: in.AllowedActions, DetectedAt: in.DetectedAt, ReminderInterval: time.Duration(in.ReminderIntervalSeconds) * time.Second, EscalationAt: in.EscalationAt})
+	if err != nil {
+		if errors.Is(err, gate.ErrLaneAlreadyGated) {
+			envelope.WriteAPIError(w, r, http.StatusConflict, "conflict", "HUMAN_GATE_ALREADY_OPEN", err.Error(), nil)
+			return
+		}
+		envelope.WriteError(w, r, err)
+		return
+	}
+	response := DetectBlockResponse{Category: result.Category, ProfileHash: result.ProfileHash}
+	if result.Gate != nil {
+		response.GateID, response.GateState = result.Gate.ID, result.Gate.State
+	}
+	envelope.WriteJSON(w, http.StatusOK, response)
 }
 
 func (c *SessionsController) preflightSpawn(w http.ResponseWriter, r *http.Request) {
@@ -775,6 +812,19 @@ func sessionView(s domain.Session) SessionView {
 		next := s.CapacityWait.NextProbeAt
 		view.CapacityNextProbeAt = &next
 		view.CapacityAttemptCount = s.CapacityWait.AttemptCount
+	}
+	if s.HumanGate != nil {
+		view.HumanGateID = s.HumanGate.ID
+		view.HumanGateReason = s.HumanGate.Reason
+		view.HumanGateRequiredDecision = s.HumanGate.RequiredDecision
+		view.HumanGateAffectedTaskID = s.HumanGate.AffectedTaskID
+		view.HumanGateAllowedActions = s.HumanGate.AllowedActions
+		detected := s.HumanGate.DetectedAt
+		view.HumanGateDetectedAt = &detected
+		if age := time.Since(detected); age > 0 {
+			view.HumanGateAgeSeconds = int64(age / time.Second)
+		}
+		view.HumanGateDependencyImpact = len(s.HumanGate.DependencyEdges)
 	}
 	return view
 }

@@ -36,6 +36,10 @@ type capacityWaitReader interface {
 	GetCapacityWait(context.Context, domain.SessionID) (domain.CapacityWait, bool, error)
 }
 
+type humanGateReader interface {
+	GetOpenHumanGateForSession(context.Context, domain.SessionID) (domain.HumanGate, bool, error)
+}
+
 // ListFilter captures API-facing session list query filters.
 type ListFilter struct {
 	ProjectID        domain.ProjectID
@@ -639,6 +643,8 @@ func toAPIError(err error) error {
 		return apierr.Invalid("AGENT_REQUIRED", err.Error(), nil)
 	case errors.Is(err, domain.ErrExecutionProfileUnauthorized):
 		return apierr.Conflict("EXECUTION_PROFILE_CHANGE_UNAUTHORIZED", err.Error(), nil)
+	case errors.Is(err, sessionmanager.ErrHumanGateOpen):
+		return apierr.Conflict("HUMAN_GATE_OPEN", err.Error(), nil)
 	case errors.Is(err, domain.ErrExecutionProfileMissing), errors.Is(err, domain.ErrExecutionProfileDrift):
 		return apierr.Conflict("EXECUTION_PROFILE_INVALID", err.Error(), nil)
 	case errors.Is(err, ports.ErrWorkspaceBranchCheckedOutElsewhere):
@@ -673,7 +679,18 @@ func (s *Service) toSession(ctx context.Context, rec domain.SessionRecord) (doma
 			activeWait = &wait
 		}
 	}
-	return domain.Session{SessionRecord: rec, Status: status, TerminalHandleID: rec.Metadata.RuntimeHandleID, CapacityWait: activeWait, PRs: prs}, nil
+	var activeGate *domain.HumanGate
+	if reader, ok := s.store.(humanGateReader); ok {
+		gate, found, err := reader.GetOpenHumanGateForSession(ctx, rec.ID)
+		if err != nil {
+			return domain.Session{}, fmt.Errorf("human gate %s: %w", rec.ID, err)
+		}
+		if found && gate.MatchesSession(rec) {
+			status = domain.StatusHumanGate
+			activeGate = &gate
+		}
+	}
+	return domain.Session{SessionRecord: rec, Status: status, TerminalHandleID: rec.Metadata.RuntimeHandleID, CapacityWait: activeWait, HumanGate: activeGate, PRs: prs}, nil
 }
 
 // now tolerates a zero-value Service (tests construct the struct literally

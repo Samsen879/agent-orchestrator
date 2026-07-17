@@ -24,6 +24,7 @@ var ctx = context.Background()
 type fakeStore struct {
 	sessions      map[domain.SessionID]domain.SessionRecord
 	waits         map[domain.SessionID]domain.CapacityWait
+	gates         map[domain.SessionID]domain.HumanGate
 	pr            map[domain.SessionID]domain.PRFacts
 	projects      map[string]domain.ProjectRecord
 	workspaceRepo map[string][]domain.WorkspaceRepoRecord
@@ -43,12 +44,17 @@ func newFakeStore() *fakeStore {
 	return &fakeStore{
 		sessions:      map[domain.SessionID]domain.SessionRecord{},
 		waits:         map[domain.SessionID]domain.CapacityWait{},
+		gates:         map[domain.SessionID]domain.HumanGate{},
 		pr:            map[domain.SessionID]domain.PRFacts{},
 		projects:      map[string]domain.ProjectRecord{},
 		workspaceRepo: map[string][]domain.WorkspaceRepoRecord{},
 		worktrees:     map[domain.SessionID][]domain.SessionWorktreeRecord{},
 		reservations:  map[string]domain.SpawnReservation{},
 	}
+}
+func (f *fakeStore) GetOpenHumanGateForSession(_ context.Context, id domain.SessionID) (domain.HumanGate, bool, error) {
+	gate, ok := f.gates[id]
+	return gate, ok && gate.Open(), nil
 }
 func (f *fakeStore) GetCapacityWait(_ context.Context, id domain.SessionID) (domain.CapacityWait, bool, error) {
 	wait, ok := f.waits[id]
@@ -624,6 +630,29 @@ type fakeMessenger struct {
 func (m *fakeMessenger) Send(_ context.Context, _ domain.SessionID, msg string) error {
 	m.msgs = append(m.msgs, msg)
 	return m.err
+}
+
+func TestSendBlocksOnlyGatedLaneAndAuthorizedResumeBypassesExactGate(t *testing.T) {
+	st := newFakeStore()
+	msg := &fakeMessenger{}
+	m := New(Deps{Store: st, Messenger: msg})
+	for _, id := range []domain.SessionID{"lane-a", "lane-b"} {
+		st.sessions[id] = domain.SessionRecord{ID: id, Metadata: domain.SessionMetadata{Generation: "g1", ExecutionProfile: domain.ExecutionProfile{Hash: "profile-1"}}}
+	}
+	gate := domain.HumanGate{ID: "gate-a", SessionID: "lane-a", SourceGeneration: "g1", ProfileHash: "profile-1", State: domain.GateOpen}
+	st.gates["lane-a"] = gate
+	if err := m.Send(ctx, "lane-a", "orchestrator says continue"); !errors.Is(err, ErrHumanGateOpen) {
+		t.Fatalf("gated lane send err=%v", err)
+	}
+	if err := m.Send(ctx, "lane-b", "independent work"); err != nil {
+		t.Fatalf("independent lane blocked: %v", err)
+	}
+	if err := m.ResumeHumanGate(ctx, gate, "authorized decision"); err != nil {
+		t.Fatalf("authorized gate resume: %v", err)
+	}
+	if len(msg.msgs) != 2 || msg.msgs[0] != "independent work" || msg.msgs[1] != "authorized decision" {
+		t.Fatalf("messages=%v", msg.msgs)
+	}
 }
 
 func TestSend_WrapsCopilotOrchestratorMessageWithDelegationDirective(t *testing.T) {

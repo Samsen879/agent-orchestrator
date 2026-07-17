@@ -22,6 +22,7 @@ type APIDeps struct {
 	Agents             controllers.AgentCatalog
 	Projects           projectsvc.Manager
 	Sessions           controllers.SessionService
+	Gates              controllers.GateService
 	Activity           controllers.ActivityRecorder
 	PRs                prsvc.ActionManager
 	Reviews            reviewsvc.Manager
@@ -63,6 +64,7 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 		sessions: &controllers.SessionsController{
 			Svc:      deps.Sessions,
 			Activity: deps.Activity,
+			Gates:    deps.Gates,
 		},
 		prs:           &controllers.PRsController{Svc: deps.PRs},
 		reviews:       &controllers.ReviewsController{Svc: deps.Reviews},

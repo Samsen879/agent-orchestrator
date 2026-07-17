@@ -58,6 +58,13 @@ type sessionDTO struct {
 	CapacityWaitReason           string              `json:"capacityWaitReason,omitempty"`
 	CapacityNextProbeAt          *time.Time          `json:"capacityNextProbeAt,omitempty"`
 	CapacityAttemptCount         int                 `json:"capacityAttemptCount,omitempty"`
+	HumanGateID                  string              `json:"humanGateId,omitempty"`
+	HumanGateReason              string              `json:"humanGateReason,omitempty"`
+	HumanGateRequiredDecision    string              `json:"humanGateRequiredDecision,omitempty"`
+	HumanGateAffectedTaskID      string              `json:"humanGateAffectedTaskId,omitempty"`
+	HumanGateDetectedAt          *time.Time          `json:"humanGateDetectedAt,omitempty"`
+	HumanGateAgeSeconds          int64               `json:"humanGateAgeSeconds,omitempty"`
+	HumanGateDependencyImpact    int                 `json:"humanGateDependencyImpact,omitempty"`
 }
 
 type executionProfileDTO struct {

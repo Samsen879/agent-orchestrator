@@ -134,6 +134,14 @@ type SessionView struct {
 	CapacityWaitReason           string                   `json:"capacityWaitReason,omitempty"`
 	CapacityNextProbeAt          *time.Time               `json:"capacityNextProbeAt,omitempty"`
 	CapacityAttemptCount         int                      `json:"capacityAttemptCount,omitempty"`
+	HumanGateID                  string                   `json:"humanGateId,omitempty"`
+	HumanGateReason              domain.BlockReason       `json:"humanGateReason,omitempty"`
+	HumanGateRequiredDecision    string                   `json:"humanGateRequiredDecision,omitempty"`
+	HumanGateAffectedTaskID      string                   `json:"humanGateAffectedTaskId,omitempty"`
+	HumanGateAllowedActions      []string                 `json:"humanGateAllowedActions,omitempty"`
+	HumanGateDetectedAt          *time.Time               `json:"humanGateDetectedAt,omitempty"`
+	HumanGateAgeSeconds          int64                    `json:"humanGateAgeSeconds,omitempty"`
+	HumanGateDependencyImpact    int                      `json:"humanGateDependencyImpact,omitempty"`
 	// PreviewURL is the browser preview target the desktop app opens for this
 	// session, set via POST /sessions/{sessionId}/preview. Empty (omitted) when
 	// no preview has been requested. Pulled from the json:"-" domain Metadata.
@@ -144,6 +152,31 @@ type SessionView struct {
 	// Metadata.
 	PreviewRevision int64            `json:"previewRevision,omitempty"`
 	PRs             []SessionPRFacts `json:"prs"`
+}
+
+// DetectBlockRequest is the typed blocked-state signal accepted for deterministic classification.
+type DetectBlockRequest struct {
+	DedupeKey               string                      `json:"dedupeKey,omitempty"`
+	ProjectID               domain.ProjectID            `json:"projectId"`
+	SourceGeneration        string                      `json:"sourceGeneration"`
+	ProfileHash             string                      `json:"profileHash,omitempty"`
+	Reason                  domain.BlockReason          `json:"reason"`
+	RequiredDecision        string                      `json:"requiredDecision,omitempty"`
+	Evidence                []domain.GateEvidence       `json:"evidence,omitempty"`
+	AffectedTaskID          string                      `json:"affectedTaskId,omitempty"`
+	DependencyEdges         []domain.GateDependencyEdge `json:"dependencyEdges,omitempty"`
+	AllowedActions          []string                    `json:"allowedActions,omitempty"`
+	DetectedAt              time.Time                   `json:"detectedAt,omitempty"`
+	ReminderIntervalSeconds int64                       `json:"reminderIntervalSeconds,omitempty"`
+	EscalationAt            time.Time                   `json:"escalationAt,omitempty"`
+}
+
+// DetectBlockResponse reports the policy category and optional durable gate identity.
+type DetectBlockResponse struct {
+	Category    domain.BlockCategory `json:"category"`
+	ProfileHash string               `json:"profileHash,omitempty"`
+	GateID      string               `json:"gateId,omitempty"`
+	GateState   domain.GateState     `json:"gateState,omitempty"`
 }
 
 // ListSessionsResponse is the body of GET /api/v1/sessions.
@@ -524,7 +557,7 @@ type NotificationResponse struct {
 	SessionID string             `json:"sessionId"`
 	ProjectID string             `json:"projectId"`
 	PRURL     string             `json:"prUrl"`
-	Type      string             `json:"type" enum:"needs_input,ready_to_merge,pr_merged,pr_closed_unmerged,capacity_wait"`
+	Type      string             `json:"type" enum:"needs_input,ready_to_merge,pr_merged,pr_closed_unmerged,capacity_wait,human_gate"`
 	Title     string             `json:"title"`
 	Body      string             `json:"body"`
 	Status    string             `json:"status" enum:"unread,read"`

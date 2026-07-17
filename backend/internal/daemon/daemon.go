@@ -17,6 +17,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 	"github.com/aoagents/agent-orchestrator/backend/internal/daemon/supervisor"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/gate"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/controllers"
 	"github.com/aoagents/agent-orchestrator/backend/internal/mobilebridge"
@@ -133,6 +134,7 @@ func Run() error {
 		return fmt.Errorf("wire session service: %w", err)
 	}
 	lcStack.trackerDone = startTrackerIntake(ctx, store, sessionSvc, log)
+	gateManager := gate.New(store, sessMgr, notificationWriter, nil)
 	previewDone := preview.NewPoller(store, sessionSvc, "http://"+cfg.Addr(), preview.PollerConfig{Logger: log}).Start(ctx)
 	agentSvc := agentsvc.New()
 	go func() {
@@ -157,6 +159,7 @@ func Run() error {
 		Projects:           projectsvc.NewWithDeps(projectsvc.Deps{Store: store, Sessions: sessionSvc, DefaultHarness: domain.AgentHarness(cfg.Agent), Telemetry: telemetrySink}),
 		Agents:             agentSvc,
 		Sessions:           sessionSvc,
+		Gates:              gateManager,
 		Reviews:            reviewSvc,
 		Notifications:      notifier,
 		NotificationStream: notificationHub,

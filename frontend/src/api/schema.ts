@@ -435,6 +435,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/sessions/{sessionId}/gates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Deterministically classify a blocked lane and persist protected human gates */
+        post: operations["detectSessionGate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/sessions/{sessionId}/kill": {
         parameters: {
             query?: never;
@@ -758,6 +775,16 @@ export interface components {
             executionProfile: components["schemas"]["DomainExecutionProfile"];
             executionProfileDrift: boolean;
             harness?: string;
+            humanGateAffectedTaskId?: string;
+            /** Format: int64 */
+            humanGateAgeSeconds?: number;
+            humanGateAllowedActions?: string[];
+            humanGateDependencyImpact?: number;
+            /** Format: date-time */
+            humanGateDetectedAt?: null | string;
+            humanGateId?: string;
+            humanGateReason?: string;
+            humanGateRequiredDecision?: string;
             id: string;
             isTerminated: boolean;
             issueId?: string;
@@ -769,7 +796,7 @@ export interface components {
             projectId: string;
             prs: components["schemas"]["SessionPRFacts"][];
             /** @enum {string} */
-            status: "working" | "pr_open" | "draft" | "ci_failed" | "review_pending" | "changes_requested" | "approved" | "mergeable" | "merged" | "needs_input" | "capacity_wait" | "idle" | "terminated" | "no_signal";
+            status: "working" | "pr_open" | "draft" | "ci_failed" | "review_pending" | "changes_requested" | "approved" | "mergeable" | "merged" | "needs_input" | "capacity_wait" | "human_gate" | "idle" | "terminated" | "no_signal";
             terminalHandleId?: string;
             /** Format: date-time */
             updatedAt: string;
@@ -780,6 +807,30 @@ export interface components {
             name: string;
             path: string;
             resolveError: string;
+        };
+        DetectBlockRequest: {
+            affectedTaskId?: string;
+            allowedActions?: string[];
+            dedupeKey?: string;
+            dependencyEdges?: components["schemas"]["GateDependencyEdge"][];
+            /** Format: date-time */
+            detectedAt?: string;
+            /** Format: date-time */
+            escalationAt?: string;
+            evidence?: components["schemas"]["GateEvidence"][];
+            profileHash?: string;
+            projectId: string;
+            reason: string;
+            /** Format: int64 */
+            reminderIntervalSeconds?: number;
+            requiredDecision?: string;
+            sourceGeneration: string;
+        };
+        DetectBlockResponse: {
+            category: string;
+            gateId?: string;
+            gateState?: string;
+            profileHash?: string;
         };
         DomainActivity: {
             /** Format: date-time */
@@ -828,6 +879,15 @@ export interface components {
             profileHash: string;
             runtime: string;
             state: string;
+        };
+        GateDependencyEdge: {
+            fromTaskId: string;
+            toTaskId: string;
+        };
+        GateEvidence: {
+            detail: string;
+            kind: string;
+            source: string;
         };
         ImportReport: {
             dryRun: boolean;
@@ -916,7 +976,7 @@ export interface components {
             target: components["schemas"]["NotificationTarget"];
             title: string;
             /** @enum {string} */
-            type: "needs_input" | "ready_to_merge" | "pr_merged" | "pr_closed_unmerged" | "capacity_wait";
+            type: "needs_input" | "ready_to_merge" | "pr_merged" | "pr_closed_unmerged" | "capacity_wait" | "human_gate";
         };
         NotificationTarget: {
             /** @enum {string} */
@@ -2666,6 +2726,60 @@ export interface operations {
             };
             /** @description Not Found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    detectSessionGate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Session identifier, e.g. project-1. */
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DetectBlockRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DetectBlockResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };

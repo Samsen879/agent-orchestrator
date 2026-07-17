@@ -10,6 +10,7 @@ export type SessionStatus =
 	| "merged"
 	| "needs_input"
 	| "capacity_wait"
+	| "human_gate"
 	| "no_signal"
 	| "idle"
 	| "terminated"
@@ -27,6 +28,7 @@ const sessionStatuses = new Set<SessionStatus>([
 	"merged",
 	"needs_input",
 	"capacity_wait",
+	"human_gate",
 	"no_signal",
 	"idle",
 	"terminated",
@@ -147,6 +149,13 @@ export type WorkspaceSession = {
 	capacityWaitReason?: string;
 	capacityNextProbeAt?: string;
 	capacityAttemptCount?: number;
+	humanGateId?: string;
+	humanGateReason?: string;
+	humanGateRequiredDecision?: string;
+	humanGateAffectedTaskId?: string;
+	humanGateDetectedAt?: string;
+	humanGateAgeSeconds?: number;
+	humanGateDependencyImpact?: number;
 	/** The session's git diff against its base, when known. */
 	changedFiles?: ChangedFile[];
 	/** Pre-filled commit subject for the Git rail, when known. */
@@ -196,6 +205,7 @@ export function workerDisplayStatus(session: WorkspaceSession): WorkerDisplaySta
 	if (session.displayStatus) return session.displayStatus;
 	switch (session.status) {
 		case "needs_input":
+		case "human_gate":
 		case "changes_requested":
 		case "review_pending":
 			return "needs_you";
@@ -293,6 +303,7 @@ export function sessionIsActive(session: WorkspaceSession): boolean {
 export function sessionNeedsAttention(session: WorkspaceSession): boolean {
 	return (
 		session.status === "needs_input" ||
+		session.status === "human_gate" ||
 		session.status === "no_signal" ||
 		session.status === "changes_requested" ||
 		session.status === "review_pending" ||
@@ -348,6 +359,7 @@ export function attentionZone(session: WorkspaceSession): AttentionZone {
 		// Agent waiting on a human (respond) or a problem to investigate (review);
 		// agent-orchestrator collapses these into one "action" zone by default.
 		case "needs_input":
+		case "human_gate":
 		case "no_signal":
 		case "ci_failed":
 		case "changes_requested":

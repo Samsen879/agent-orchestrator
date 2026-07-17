@@ -103,9 +103,10 @@ type SessionRecord struct {
 // plus the derived display Status.
 type Session struct {
 	SessionRecord
-	Status           SessionStatus `json:"status" enum:"working,pr_open,draft,ci_failed,review_pending,changes_requested,approved,mergeable,merged,needs_input,capacity_wait,idle,terminated,no_signal"`
+	Status           SessionStatus `json:"status" enum:"working,pr_open,draft,ci_failed,review_pending,changes_requested,approved,mergeable,merged,needs_input,capacity_wait,human_gate,idle,terminated,no_signal"`
 	TerminalHandleID string        `json:"terminalHandleId,omitempty"`
 	CapacityWait     *CapacityWait `json:"-"`
+	HumanGate        *HumanGate    `json:"-"`
 	// PRs are the session's attributed pull requests (one session can own many).
 	// They feed status derivation and are surfaced on the API read model. Not
 	// serialized here: the HTTP boundary maps them to the curated wire shape.

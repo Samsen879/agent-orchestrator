@@ -42,6 +42,38 @@ type ChangeLog struct {
 	CreatedAt time.Time
 }
 
+type HumanGate struct {
+	GateID                  string
+	DedupeKey               string
+	ProjectID               string
+	SessionID               string
+	SourceGeneration        string
+	ProfileHash             string
+	Reason                  string
+	RequiredDecision        string
+	EvidenceJson            string
+	AffectedTaskID          string
+	DependencyEdgesJson     string
+	AllowedActionsJson      string
+	State                   string
+	DetectedAt              time.Time
+	UpdatedAt               time.Time
+	NotifiedAt              sql.NullTime
+	ReminderIntervalSeconds int64
+	NextReminderAt          sql.NullTime
+	EscalationAt            sql.NullTime
+	ReminderCount           int64
+	LastRemindedAt          sql.NullTime
+	ResolutionActor         string
+	ResolutionActorClass    string
+	ResolutionProvenance    string
+	ResolutionAction        string
+	ResolutionDecision      string
+	ResolvedAt              sql.NullTime
+	ResultingState          string
+	ResolutionFailure       string
+}
+
 type LifecycleReaction struct {
 	EventID            string
 	Version            int64

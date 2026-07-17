@@ -80,6 +80,7 @@ type sessionLifecycle interface {
 	Reconcile(ctx context.Context) error
 	RestoreAll(ctx context.Context) error
 	ResumeCapacity(ctx context.Context, wait domain.CapacityWait) error
+	ResumeHumanGate(ctx context.Context, gate domain.HumanGate, message string) error
 }
 
 func (l *lifecycleStack) startCapacity(ctx context.Context, store *sqlite.Store, sessions sessionLifecycle, notifier notificationSink, logger *slog.Logger) {

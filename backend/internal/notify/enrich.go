@@ -20,7 +20,7 @@ func enrich(intent Intent) (domain.NotificationRecord, error) {
 	if !intent.Type.Valid() {
 		return domain.NotificationRecord{}, domain.ErrInvalidNotificationType
 	}
-	if intent.Type != domain.NotificationNeedsInput && intent.Type != domain.NotificationCapacityWait && rec.PRURL == "" {
+	if intent.Type != domain.NotificationNeedsInput && intent.Type != domain.NotificationCapacityWait && intent.Type != domain.NotificationHumanGate && rec.PRURL == "" {
 		return domain.NotificationRecord{}, domain.ErrInvalidNotificationRecord
 	}
 	rec.Title = titleForIntent(intent)
@@ -43,6 +43,8 @@ func titleForIntent(intent Intent) string {
 		return fmt.Sprintf("%s was closed without merging", prLabel(intent))
 	case domain.NotificationCapacityWait:
 		return fmt.Sprintf("%s is waiting for provider capacity", sessionLabel(intent))
+	case domain.NotificationHumanGate:
+		return fmt.Sprintf("%s requires a human decision", sessionLabel(intent))
 	default:
 		return "Notification"
 	}
@@ -72,6 +74,11 @@ func bodyForIntent(intent Intent) string {
 			return fmt.Sprintf("AO will retry the same session at %s. %s", intent.NextProbeAt.UTC().Format(time.RFC3339), strings.TrimSpace(intent.WaitReason))
 		}
 		return "AO will retry the same session when provider capacity is available."
+	case domain.NotificationHumanGate:
+		if task := strings.TrimSpace(intent.AffectedTaskID); task != "" {
+			return fmt.Sprintf("Task %s is gated: %s", task, strings.TrimSpace(intent.RequiredDecision))
+		}
+		return strings.TrimSpace(intent.RequiredDecision)
 	default:
 		return ""
 	}

@@ -60,6 +60,8 @@ var (
 	// ErrCapacityIdentityMismatch means a scheduled recovery no longer matches
 	// the durable session generation, thread, workspace, branch, or profile.
 	ErrCapacityIdentityMismatch = errors.New("session: capacity recovery identity mismatch")
+	// ErrHumanGateOpen prevents prompt instructions from bypassing a protected decision.
+	ErrHumanGateOpen = errors.New("session: protected human gate is open")
 )
 
 // Env vars a spawned process reads to learn who it is.
@@ -147,6 +149,10 @@ type Store interface {
 
 type capacityWaitReader interface {
 	GetCapacityWait(context.Context, domain.SessionID) (domain.CapacityWait, bool, error)
+}
+
+type humanGateReader interface {
+	GetOpenHumanGateForSession(context.Context, domain.SessionID) (domain.HumanGate, bool, error)
 }
 
 // Manager coordinates internal session spawn, restore, kill, and cleanup over
@@ -1720,6 +1726,31 @@ func (m *Manager) applyWorkspaceProjectPreserved(ctx context.Context, rows []por
 // the session is active or the budget is exhausted. Confirmation never fails
 // the send: it only decides whether to nudge again.
 func (m *Manager) Send(ctx context.Context, id domain.SessionID, message string) error {
+	return m.send(ctx, id, message, "")
+}
+
+// ResumeHumanGate permits exactly one matching authorized gate decision to
+// pass the ordinary open-gate send guard.
+func (m *Manager) ResumeHumanGate(ctx context.Context, gate domain.HumanGate, message string) error {
+	return m.send(ctx, gate.SessionID, message, gate.ID)
+}
+
+func (m *Manager) send(ctx context.Context, id domain.SessionID, message, authorizedGateID string) error {
+	if reader, ok := m.store.(humanGateReader); ok {
+		gate, found, err := reader.GetOpenHumanGateForSession(ctx, id)
+		if err != nil {
+			return fmt.Errorf("send %s: human gate: %w", id, err)
+		}
+		if found {
+			rec, current, getErr := m.store.GetSession(ctx, id)
+			if getErr != nil {
+				return fmt.Errorf("send %s: session: %w", id, getErr)
+			}
+			if current && gate.MatchesSession(rec) && gate.ID != authorizedGateID {
+				return fmt.Errorf("send %s: %w (%s)", id, ErrHumanGateOpen, gate.ID)
+			}
+		}
+	}
 	message, err := m.prepareOutboundMessage(ctx, id, message)
 	if err != nil {
 		return err

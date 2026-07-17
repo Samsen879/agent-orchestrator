@@ -2,6 +2,7 @@ package controllers_test
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -31,6 +32,62 @@ type fakeSessionService struct {
 	spawnErr        error
 	claimErr        error
 	listPRErr       error
+}
+
+func TestHumanGateResolutionHasNoSpoofableHTTPRoute(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := httptest.NewServer(httpd.NewRouterWithControl(config.Config{}, log, nil, httpd.APIDeps{}, httpd.ControlDeps{}))
+	defer srv.Close()
+	body := strings.NewReader(`{"actor":"orchestrator","actorType":"human","authorizationProvenance":"self-asserted","action":"approve","decision":"bypass"}`)
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/sessions/lane-a/gates/gate-a/resolve", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("self-asserted human resolution status=%d, want 404 fail-closed", resp.StatusCode)
+	}
+}
+
+func TestSessionStatusSurfacesHumanGateDiagnostics(t *testing.T) {
+	svc := newFakeSessionService()
+	now := time.Now().UTC()
+	session := svc.sessions["ao-1"]
+	session.Status = domain.StatusHumanGate
+	session.HumanGate = &domain.HumanGate{ID: "gate-1", Reason: domain.BlockReasonProductDecision, RequiredDecision: "Choose A or B", AffectedTaskID: "task-a",
+		DetectedAt: now.Add(-90 * time.Second), DependencyEdges: []domain.GateDependencyEdge{{FromTaskID: "task-a", ToTaskID: "task-b"}, {FromTaskID: "task-a", ToTaskID: "task-c"}}}
+	svc.sessions[session.ID] = session
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := httptest.NewServer(httpd.NewRouterWithControl(config.Config{}, log, nil, httpd.APIDeps{Sessions: svc}, httpd.ControlDeps{}))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/api/v1/sessions/ao-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var body struct {
+		Session struct {
+			Status                    domain.SessionStatus `json:"status"`
+			HumanGateID               string               `json:"humanGateId"`
+			HumanGateRequiredDecision string               `json:"humanGateRequiredDecision"`
+			HumanGateAffectedTaskID   string               `json:"humanGateAffectedTaskId"`
+			HumanGateAgeSeconds       int64                `json:"humanGateAgeSeconds"`
+			HumanGateDependencyImpact int                  `json:"humanGateDependencyImpact"`
+		} `json:"session"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Session.Status != domain.StatusHumanGate || body.Session.HumanGateID != "gate-1" || body.Session.HumanGateRequiredDecision != "Choose A or B" ||
+		body.Session.HumanGateAffectedTaskID != "task-a" || body.Session.HumanGateAgeSeconds < 89 || body.Session.HumanGateDependencyImpact != 2 {
+		t.Fatalf("human gate session view = %+v", body.Session)
+	}
 }
 
 func newFakeSessionService() *fakeSessionService {
