@@ -14,6 +14,7 @@ type NotificationIntent struct {
 	SessionID domain.SessionID
 	ProjectID domain.ProjectID
 	PRURL     string
+	DedupeKey string
 	CreatedAt time.Time
 
 	// Enrichment hints. These avoid storage reads on the hot path.

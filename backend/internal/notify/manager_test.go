@@ -78,6 +78,22 @@ func TestManagerNotifyRejectsUnknownType(t *testing.T) {
 	}
 }
 
+func TestManagerHumanGateRequiresAndPersistsGateIdentity(t *testing.T) {
+	st := &fakeStore{}
+	mgr := New(Deps{Store: st, Clock: func() time.Time { return time.Now() }, NewID: func() string { return "ntf_gate" }})
+	intent := Intent{Type: domain.NotificationHumanGate, SessionID: "mer-1", ProjectID: "mer", RequiredDecision: "Choose A"}
+	if err := mgr.Notify(context.Background(), intent); !errors.Is(err, domain.ErrInvalidNotificationRecord) {
+		t.Fatalf("missing gate identity err=%v", err)
+	}
+	intent.DedupeKey = "gate-1"
+	if err := mgr.Notify(context.Background(), intent); err != nil {
+		t.Fatal(err)
+	}
+	if len(st.rows) != 1 || st.rows[0].DedupeKey != "gate-1" {
+		t.Fatalf("stored human gate notifications=%+v", st.rows)
+	}
+}
+
 func TestHubProjectFilter(t *testing.T) {
 	hub := NewHub()
 	ch, unsub := hub.Subscribe("mer")

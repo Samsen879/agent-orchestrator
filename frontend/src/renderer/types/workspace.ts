@@ -153,6 +153,7 @@ export type WorkspaceSession = {
 	humanGateReason?: string;
 	humanGateRequiredDecision?: string;
 	humanGateAffectedTaskId?: string;
+	humanGateAllowedActions?: string[];
 	humanGateDetectedAt?: string;
 	humanGateAgeSeconds?: number;
 	humanGateDependencyImpact?: number;

@@ -72,6 +72,7 @@ async function fetchWorkspaces(): Promise<WorkspaceSummary[]> {
 				humanGateReason: session.humanGateReason,
 				humanGateRequiredDecision: session.humanGateRequiredDecision,
 				humanGateAffectedTaskId: session.humanGateAffectedTaskId,
+				humanGateAllowedActions: session.humanGateAllowedActions,
 				humanGateDetectedAt: session.humanGateDetectedAt ?? undefined,
 				humanGateAgeSeconds: session.humanGateAgeSeconds,
 				humanGateDependencyImpact: session.humanGateDependencyImpact,

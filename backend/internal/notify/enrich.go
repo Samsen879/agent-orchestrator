@@ -13,6 +13,7 @@ func enrich(intent Intent) (domain.NotificationRecord, error) {
 		SessionID: intent.SessionID,
 		ProjectID: intent.ProjectID,
 		PRURL:     strings.TrimSpace(intent.PRURL),
+		DedupeKey: strings.TrimSpace(intent.DedupeKey),
 		Type:      intent.Type,
 		Status:    domain.NotificationUnread,
 		CreatedAt: intent.CreatedAt,

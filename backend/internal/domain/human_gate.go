@@ -155,6 +155,12 @@ type HumanGate struct {
 // Open reports whether the gate still protects its affected lane.
 func (g HumanGate) Open() bool { return g.State == GateOpen }
 
+// ProtectsSession reports whether this open gate blocks the durable session.
+// Generation and profile drift never bypass a still-open protected decision.
+func (g HumanGate) ProtectsSession(rec SessionRecord) bool {
+	return g.Open() && g.SessionID == rec.ID
+}
+
 // MatchesSession verifies that a gate still belongs to the exact durable session generation and profile.
 func (g HumanGate) MatchesSession(rec SessionRecord) bool {
 	return g.SessionID == rec.ID && g.SourceGeneration != "" && g.SourceGeneration == rec.Metadata.Generation &&

@@ -34,6 +34,7 @@ func (s *Store) CreateNotification(ctx context.Context, rec domain.NotificationR
 		SessionID: rec.SessionID,
 		ProjectID: rec.ProjectID,
 		PRURL:     rec.PRURL,
+		DedupeKey: rec.DedupeKey,
 		Type:      rec.Type,
 		Title:     rec.Title,
 		Body:      rec.Body,
@@ -92,6 +93,7 @@ func (s *Store) getUnreadNotificationByDedupe(ctx context.Context, rec domain.No
 		SessionID: rec.SessionID,
 		Type:      rec.Type,
 		PRURL:     rec.PRURL,
+		DedupeKey: rec.DedupeKey,
 	})
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.NotificationRecord{}, false, nil
@@ -113,6 +115,7 @@ func notificationFromGen(row gen.Notification) domain.NotificationRecord {
 		SessionID: row.SessionID,
 		ProjectID: row.ProjectID,
 		PRURL:     row.PRURL,
+		DedupeKey: row.DedupeKey,
 		Type:      row.Type,
 		Title:     row.Title,
 		Body:      row.Body,

@@ -160,6 +160,8 @@ INSERT INTO human_gates (
     resolution_action, resolution_decision, resolved_at, resulting_state, resolution_failure
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(gate_id) DO UPDATE SET
+	 source_generation = excluded.source_generation,
+	 profile_hash = excluded.profile_hash,
     required_decision = excluded.required_decision,
     evidence_json = excluded.evidence_json,
     dependency_edges_json = excluded.dependency_edges_json,

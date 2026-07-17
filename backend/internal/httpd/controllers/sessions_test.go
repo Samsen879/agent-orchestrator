@@ -17,6 +17,7 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/gate"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apierr"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
@@ -32,6 +33,12 @@ type fakeSessionService struct {
 	spawnErr        error
 	claimErr        error
 	listPRErr       error
+}
+
+type fakeGateService struct{ err error }
+
+func (f fakeGateService) Detect(context.Context, domain.BlockSignal) (gate.Result, error) {
+	return gate.Result{}, f.err
 }
 
 func TestHumanGateResolutionHasNoSpoofableHTTPRoute(t *testing.T) {
@@ -51,6 +58,40 @@ func TestHumanGateResolutionHasNoSpoofableHTTPRoute(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("self-asserted human resolution status=%d, want 404 fail-closed", resp.StatusCode)
+	}
+}
+
+func TestDetectHumanGateMapsTypedClientErrors(t *testing.T) {
+	tests := []struct {
+		name       string
+		err        error
+		wantStatus int
+		wantCode   string
+	}{
+		{name: "invalid signal", err: gate.ErrInvalidSignal, wantStatus: http.StatusBadRequest, wantCode: "INVALID_HUMAN_GATE_SIGNAL"},
+		{name: "stale identity", err: gate.ErrResolutionMismatch, wantStatus: http.StatusConflict, wantCode: "HUMAN_GATE_IDENTITY_MISMATCH"},
+		{name: "lane already gated", err: gate.ErrLaneAlreadyGated, wantStatus: http.StatusConflict, wantCode: "HUMAN_GATE_ALREADY_OPEN"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			log := slog.New(slog.NewTextHandler(io.Discard, nil))
+			srv := httptest.NewServer(httpd.NewRouterWithControl(config.Config{}, log, nil, httpd.APIDeps{Gates: fakeGateService{err: tt.err}}, httpd.ControlDeps{}))
+			defer srv.Close()
+			resp, err := http.Post(srv.URL+"/api/v1/sessions/lane-a/gates", "application/json", strings.NewReader(`{}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			var body struct {
+				Code string `json:"code"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if resp.StatusCode != tt.wantStatus || body.Code != tt.wantCode {
+				t.Fatalf("status=%d code=%q", resp.StatusCode, body.Code)
+			}
+		})
 	}
 }
 

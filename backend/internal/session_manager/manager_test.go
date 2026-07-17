@@ -1898,6 +1898,20 @@ func TestChangeExecutionProfileRecordsAuthorizedNewProfile(t *testing.T) {
 	}
 }
 
+func TestChangeExecutionProfileKeepsOpenHumanGateBlocking(t *testing.T) {
+	m, st, _, _ := newManager()
+	profile, _ := domain.NewExecutionProfile(domain.AgentConfig{Model: "original"}, "project_config")
+	requested, _ := domain.NewExecutionProfile(domain.AgentConfig{Model: "approved"}, "project_config")
+	st.sessions["mer-1"] = domain.SessionRecord{ID: "mer-1", ProjectID: "mer", Metadata: domain.SessionMetadata{Generation: "g1", ExecutionProfile: profile, ObservedExecutionProfileHash: profile.Hash}}
+	st.gates["mer-1"] = domain.HumanGate{ID: "gate-1", SessionID: "mer-1", SourceGeneration: "g1", ProfileHash: profile.Hash, State: domain.GateOpen}
+	if _, err := m.ChangeExecutionProfile(ctx, "mer-1", requested, "human", "operator approved"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Send(ctx, "mer-1", "continue without decision"); !errors.Is(err, ErrHumanGateOpen) {
+		t.Fatalf("post-profile-change send err=%v", err)
+	}
+}
+
 func TestRestore_RefusesLiveSession(t *testing.T) {
 	m, st, _, _ := newManager()
 	st.sessions["mer-1"] = mkLive("mer-1")

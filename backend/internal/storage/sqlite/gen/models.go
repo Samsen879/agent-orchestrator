@@ -102,6 +102,7 @@ type Notification struct {
 	SessionID domain.SessionID
 	ProjectID domain.ProjectID
 	PRURL     string
+	DedupeKey string
 	Type      domain.NotificationType
 	Title     string
 	Body      string

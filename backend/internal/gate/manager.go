@@ -21,6 +21,7 @@ var (
 	ErrGateNotFound           = errors.New("human gate not found")
 	ErrGateNotOpen            = errors.New("human gate is not open")
 	ErrLaneAlreadyGated       = errors.New("session already has an open human gate")
+	ErrInvalidSignal          = errors.New("invalid human gate signal")
 	ErrHumanAuthorityRequired = errors.New("human gate resolution requires human authority")
 	ErrResolutionMismatch     = errors.New("human gate resolution does not match the gate")
 )
@@ -57,7 +58,13 @@ type Manager struct {
 	resumer  Resumer
 	notifier Notifier
 	clock    func() time.Time
-	mu       sync.Mutex
+	locksMu  sync.Mutex
+	locks    map[domain.SessionID]*sessionLock
+}
+
+type sessionLock struct {
+	mu   sync.Mutex
+	refs int
 }
 
 // New constructs a deterministic human-gate manager.
@@ -72,17 +79,17 @@ func New(store Store, resumer Resumer, notifier Notifier, clock func() time.Time
 func (m *Manager) Detect(ctx context.Context, signal domain.BlockSignal) (Result, error) {
 	category, err := domain.ClassifyBlock(signal.Reason)
 	if err != nil {
-		return Result{}, err
+		return Result{}, fmt.Errorf("%w: %w", ErrInvalidSignal, err)
 	}
 	result := Result{Category: category, ProfileHash: signal.ProfileHash}
 	if category != domain.BlockHumanGate {
 		return result, nil
 	}
 	if err := validateHumanSignal(signal); err != nil {
-		return Result{}, err
+		return Result{}, fmt.Errorf("%w: %w", ErrInvalidSignal, err)
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	unlock := m.lockSession(signal.SessionID)
+	defer unlock()
 	rec, found, err := m.store.GetSession(ctx, signal.SessionID)
 	if err != nil {
 		return Result{}, err
@@ -100,19 +107,25 @@ func (m *Manager) Detect(ctx context.Context, signal domain.BlockSignal) (Result
 	if err != nil {
 		return Result{}, err
 	}
+	openGate, open, err := m.store.GetOpenHumanGateForSession(ctx, signal.SessionID)
+	if err != nil {
+		return Result{}, err
+	}
+	if open && (!exists || openGate.ID != gate.ID) {
+		if !openGate.MatchesSession(rec) {
+			rebindGate(&openGate, rec, now)
+			if err := m.store.SaveHumanGate(ctx, openGate); err != nil {
+				return Result{}, err
+			}
+		}
+		result.Gate = &openGate
+		return result, ErrLaneAlreadyGated
+	}
 	if exists && !gate.Open() {
 		result.Gate = &gate
 		return result, nil
 	}
 	if !exists {
-		openGate, open, openErr := m.store.GetOpenHumanGateForSession(ctx, signal.SessionID)
-		if openErr != nil {
-			return Result{}, openErr
-		}
-		if open && openGate.MatchesSession(rec) {
-			result.Gate = &openGate
-			return result, ErrLaneAlreadyGated
-		}
 		gate = domain.HumanGate{
 			ID: id, DedupeKey: id, ProjectID: signal.ProjectID, SessionID: signal.SessionID, SourceGeneration: signal.SourceGeneration,
 			ProfileHash: signal.ProfileHash, Reason: signal.Reason, RequiredDecision: strings.TrimSpace(signal.RequiredDecision),
@@ -124,16 +137,22 @@ func (m *Manager) Detect(ctx context.Context, signal domain.BlockSignal) (Result
 			gate.NextReminderAt = now.Add(gate.ReminderInterval)
 		}
 	} else {
+		if !gate.MatchesSession(rec) {
+			rebindGate(&gate, rec, now)
+		}
 		gate.Evidence = mergeEvidence(gate.Evidence, signal.Evidence)
 		gate.DependencyEdges = mergeEdges(gate.DependencyEdges, signal.DependencyEdges)
 		gate.AllowedActions = normalized(append(gate.AllowedActions, signal.AllowedActions...))
 		gate.UpdatedAt = now
 	}
+	// Persist the protected state before any external notification side effect.
+	// The second write below is intentional: collapsing these writes would either
+	// publish a gate that is not durable or suppress retry after notify failure.
 	if err := m.store.SaveHumanGate(ctx, gate); err != nil {
 		return Result{}, err
 	}
 	if gate.NotifiedAt.IsZero() && m.notifier != nil {
-		intent := ports.NotificationIntent{Type: domain.NotificationHumanGate, SessionID: gate.SessionID, ProjectID: gate.ProjectID, CreatedAt: now,
+		intent := ports.NotificationIntent{Type: domain.NotificationHumanGate, SessionID: gate.SessionID, ProjectID: gate.ProjectID, DedupeKey: gate.ID, CreatedAt: now,
 			SessionDisplayName: rec.DisplayName, RequiredDecision: gate.RequiredDecision, AffectedTaskID: gate.AffectedTaskID}
 		if err := m.notifier.Notify(ctx, intent); err != nil {
 			return Result{}, err
@@ -150,12 +169,19 @@ func (m *Manager) Detect(ctx context.Context, signal domain.BlockSignal) (Result
 
 // Resolve records explicit human authorization before resuming exactly one lane.
 func (m *Manager) Resolve(ctx context.Context, gateID string, resolution domain.HumanGateResolution) (domain.HumanGate, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	if resolution.ActorType != domain.GateActorHuman || strings.TrimSpace(resolution.Actor) == "" || strings.TrimSpace(resolution.AuthorizationProvenance) == "" {
 		return domain.HumanGate{}, ErrHumanAuthorityRequired
 	}
 	gate, found, err := m.store.GetHumanGate(ctx, gateID)
+	if err != nil {
+		return domain.HumanGate{}, err
+	}
+	if !found {
+		return domain.HumanGate{}, ErrGateNotFound
+	}
+	unlock := m.lockSession(gate.SessionID)
+	defer unlock()
+	gate, found, err = m.store.GetHumanGate(ctx, gateID)
 	if err != nil {
 		return domain.HumanGate{}, err
 	}
@@ -172,12 +198,15 @@ func (m *Manager) Resolve(ctx context.Context, gateID string, resolution domain.
 	if err != nil {
 		return domain.HumanGate{}, err
 	}
-	if !current || rec.IsTerminated || !gate.MatchesSession(rec) {
+	if !current || rec.IsTerminated || !gate.ProtectsSession(rec) {
 		return domain.HumanGate{}, ErrResolutionMismatch
 	}
 	now := resolution.AuthorizedAt.UTC()
 	if now.IsZero() {
 		now = m.clock()
+	}
+	if !gate.MatchesSession(rec) {
+		rebindGate(&gate, rec, now)
 	}
 	resolution.Actor = strings.TrimSpace(resolution.Actor)
 	resolution.AuthorizationProvenance = strings.TrimSpace(resolution.AuthorizationProvenance)
@@ -215,6 +244,42 @@ func (m *Manager) Resolve(ctx context.Context, gateID string, resolution domain.
 // ListOpen returns all currently protected human gates.
 func (m *Manager) ListOpen(ctx context.Context) ([]domain.HumanGate, error) {
 	return m.store.ListOpenHumanGates(ctx)
+}
+
+func (m *Manager) lockSession(id domain.SessionID) func() {
+	m.locksMu.Lock()
+	if m.locks == nil {
+		m.locks = make(map[domain.SessionID]*sessionLock)
+	}
+	lock := m.locks[id]
+	if lock == nil {
+		lock = &sessionLock{}
+		m.locks[id] = lock
+	}
+	lock.refs++
+	m.locksMu.Unlock()
+	lock.mu.Lock()
+	return func() {
+		lock.mu.Unlock()
+		m.locksMu.Lock()
+		lock.refs--
+		if lock.refs == 0 {
+			delete(m.locks, id)
+		}
+		m.locksMu.Unlock()
+	}
+}
+
+func rebindGate(gate *domain.HumanGate, rec domain.SessionRecord, now time.Time) {
+	previousGeneration, previousProfile := gate.SourceGeneration, gate.ProfileHash
+	gate.SourceGeneration = rec.Metadata.Generation
+	gate.ProfileHash = rec.Metadata.ExecutionProfile.Hash
+	gate.UpdatedAt = now
+	gate.Evidence = mergeEvidence(gate.Evidence, []domain.GateEvidence{{
+		Kind:   "identity_rebound",
+		Source: "gate_manager",
+		Detail: fmt.Sprintf("generation %s -> %s; profile %s -> %s", previousGeneration, gate.SourceGeneration, previousProfile, gate.ProfileHash),
+	}})
 }
 
 func validateHumanSignal(signal domain.BlockSignal) error {

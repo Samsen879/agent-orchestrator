@@ -3,6 +3,7 @@ package gate
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,17 +14,25 @@ import (
 type fakeStore struct {
 	gates    map[string]domain.HumanGate
 	sessions map[domain.SessionID]domain.SessionRecord
+	getHook  func(domain.SessionID)
+	mu       sync.Mutex
 }
 
 func (s *fakeStore) SaveHumanGate(_ context.Context, gate domain.HumanGate) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.gates[gate.ID] = gate
 	return nil
 }
 func (s *fakeStore) GetHumanGate(_ context.Context, id string) (domain.HumanGate, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	gate, ok := s.gates[id]
 	return gate, ok, nil
 }
 func (s *fakeStore) GetOpenHumanGateForSession(_ context.Context, id domain.SessionID) (domain.HumanGate, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	for _, gate := range s.gates {
 		if gate.SessionID == id && gate.Open() {
 			return gate, true, nil
@@ -32,6 +41,8 @@ func (s *fakeStore) GetOpenHumanGateForSession(_ context.Context, id domain.Sess
 	return domain.HumanGate{}, false, nil
 }
 func (s *fakeStore) ListOpenHumanGates(context.Context) ([]domain.HumanGate, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	var out []domain.HumanGate
 	for _, gate := range s.gates {
 		if gate.Open() {
@@ -41,6 +52,11 @@ func (s *fakeStore) ListOpenHumanGates(context.Context) ([]domain.HumanGate, err
 	return out, nil
 }
 func (s *fakeStore) GetSession(_ context.Context, id domain.SessionID) (domain.SessionRecord, bool, error) {
+	if s.getHook != nil {
+		s.getHook(id)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	rec, ok := s.sessions[id]
 	return rec, ok, nil
 }
@@ -60,11 +76,14 @@ func (r *fakeResumer) ResumeHumanGate(_ context.Context, gate domain.HumanGate, 
 	return err
 }
 
-type fakeNotifier struct{ intents []ports.NotificationIntent }
+type fakeNotifier struct {
+	intents []ports.NotificationIntent
+	err     error
+}
 
 func (n *fakeNotifier) Notify(_ context.Context, intent ports.NotificationIntent) error {
 	n.intents = append(n.intents, intent)
-	return nil
+	return n.err
 }
 
 func TestClassifyBlockPolicyTable(t *testing.T) {
@@ -110,6 +129,18 @@ func TestOperationalAndCapacityDoNotCreateGateOrDriftProfile(t *testing.T) {
 	}
 }
 
+func TestInvalidSignalsReturnTypedValidationError(t *testing.T) {
+	_, _, manager := fixture()
+	if _, err := manager.Detect(context.Background(), domain.BlockSignal{Reason: "unknown"}); !errors.Is(err, ErrInvalidSignal) {
+		t.Fatalf("unknown reason err=%v", err)
+	}
+	signal := humanSignal(domain.BlockReasonProductDecision)
+	signal.ProfileHash = ""
+	if _, err := manager.Detect(context.Background(), signal); !errors.Is(err, ErrInvalidSignal) {
+		t.Fatalf("missing profile err=%v", err)
+	}
+}
+
 func TestHumanGateFixturesPersistOnceAndDeduplicateNotification(t *testing.T) {
 	for _, reason := range []domain.BlockReason{domain.BlockReasonMissingCredentials, domain.BlockReasonPrivilegedAction, domain.BlockReasonPaidAction, domain.BlockReasonDestructiveAction, domain.BlockReasonPolicyException, domain.BlockReasonProductDecision} {
 		store, notifier, manager := fixture()
@@ -126,6 +157,94 @@ func TestHumanGateFixturesPersistOnceAndDeduplicateNotification(t *testing.T) {
 		if first.Gate.ID != second.Gate.ID || len(store.gates) != 1 || len(notifier.intents) != 1 || len(second.Gate.Evidence) != 2 {
 			t.Fatalf("reason=%q first=%+v second=%+v gates=%d notifications=%d", reason, first, second, len(store.gates), len(notifier.intents))
 		}
+		if notifier.intents[0].DedupeKey != first.Gate.ID {
+			t.Fatalf("notification dedupe key=%q gate=%q", notifier.intents[0].DedupeKey, first.Gate.ID)
+		}
+	}
+}
+
+func TestStaleOpenGateRebindsBeforeNewGenerationDetection(t *testing.T) {
+	store, _, manager := fixture()
+	created, err := manager.Detect(context.Background(), humanSignal(domain.BlockReasonProductDecision))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := store.sessions["project-1"]
+	rec.Metadata.Generation = "generation-2"
+	rec.Metadata.ExecutionProfile.Hash = "profile-2"
+	store.sessions[rec.ID] = rec
+	signal := humanSignal(domain.BlockReasonPolicyException)
+	signal.DedupeKey = "new-generation-gate"
+	signal.SourceGeneration = "generation-2"
+	signal.ProfileHash = "profile-2"
+	result, err := manager.Detect(context.Background(), signal)
+	if !errors.Is(err, ErrLaneAlreadyGated) || result.Gate == nil || result.Gate.ID != created.Gate.ID {
+		t.Fatalf("stale rebind result=%+v err=%v", result, err)
+	}
+	if result.Gate.SourceGeneration != "generation-2" || result.Gate.ProfileHash != "profile-2" || len(store.gates) != 1 {
+		t.Fatalf("rebound gate=%+v gates=%d", result.Gate, len(store.gates))
+	}
+	if got := result.Gate.Evidence[len(result.Gate.Evidence)-1]; got.Kind != "identity_rebound" {
+		t.Fatalf("rebind evidence=%+v", result.Gate.Evidence)
+	}
+}
+
+func TestIndependentSessionDetectionDoesNotWaitOnAnotherSessionLock(t *testing.T) {
+	store, _, manager := fixture()
+	store.sessions["project-2"] = domain.SessionRecord{ID: "project-2", ProjectID: "project", Kind: domain.KindWorker, Metadata: domain.SessionMetadata{Generation: "generation-1", ExecutionProfile: domain.ExecutionProfile{Hash: "profile-1"}}}
+	entered, release := make(chan struct{}), make(chan struct{})
+	store.getHook = func(id domain.SessionID) {
+		if id == "project-1" {
+			close(entered)
+			<-release
+		}
+	}
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := manager.Detect(context.Background(), humanSignal(domain.BlockReasonProductDecision))
+		firstDone <- err
+	}()
+	<-entered
+	secondSignal := humanSignal(domain.BlockReasonProductDecision)
+	secondSignal.SessionID = "project-2"
+	secondDone := make(chan error, 1)
+	go func() {
+		_, err := manager.Detect(context.Background(), secondSignal)
+		secondDone <- err
+	}()
+	select {
+	case err := <-secondDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("independent session detection was blocked by another session lock")
+	}
+	close(release)
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+	manager.locksMu.Lock()
+	defer manager.locksMu.Unlock()
+	if len(manager.locks) != 0 {
+		t.Fatalf("session locks retained after completion: %d", len(manager.locks))
+	}
+}
+
+func TestNotificationFailureLeavesDurableGateRetryable(t *testing.T) {
+	store, notifier, manager := fixture()
+	notifier.err = errors.New("notification unavailable")
+	if _, err := manager.Detect(context.Background(), humanSignal(domain.BlockReasonProductDecision)); err == nil {
+		t.Fatal("expected notification failure")
+	}
+	gate, ok, err := store.GetOpenHumanGateForSession(context.Background(), "project-1")
+	if err != nil || !ok || !gate.NotifiedAt.IsZero() {
+		t.Fatalf("persisted gate=%+v ok=%v err=%v", gate, ok, err)
+	}
+	notifier.err = nil
+	result, err := manager.Detect(context.Background(), humanSignal(domain.BlockReasonProductDecision))
+	if err != nil || result.Gate == nil || result.Gate.NotifiedAt.IsZero() || len(notifier.intents) != 2 {
+		t.Fatalf("retry result=%+v intents=%d err=%v", result, len(notifier.intents), err)
 	}
 }
 
@@ -185,6 +304,24 @@ func TestResolutionFailureRemainsProtectedAndMatchingRetryResumesLane(t *testing
 	}
 	if resumer.calls[0].SessionID != "project-1" || resumer.calls[1].SessionID != "project-1" {
 		t.Fatalf("wrong lane resumed: %+v", resumer.calls)
+	}
+}
+
+func TestAuthorizedResolutionRebindsStaleProfileBeforeResume(t *testing.T) {
+	store, _, manager := fixture()
+	resumer := &fakeResumer{}
+	manager.resumer = resumer
+	created, err := manager.Detect(context.Background(), humanSignal(domain.BlockReasonProductDecision))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := store.sessions["project-1"]
+	rec.Metadata.ExecutionProfile.Hash = "profile-2"
+	store.sessions[rec.ID] = rec
+	resolution := domain.HumanGateResolution{Actor: "alice", ActorType: domain.GateActorHuman, AuthorizationProvenance: "desktop-confirmation:43", Action: "choose-a", Decision: "choose option A"}
+	resolved, err := manager.Resolve(context.Background(), created.Gate.ID, resolution)
+	if err != nil || resolved.State != domain.GateResumed || resolved.ProfileHash != "profile-2" || len(resumer.calls) != 1 || resumer.calls[0].ProfileHash != "profile-2" {
+		t.Fatalf("resolved=%+v calls=%+v err=%v", resolved, resumer.calls, err)
 	}
 }
 

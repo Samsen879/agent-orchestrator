@@ -89,6 +89,22 @@ func TestServiceDerivesHumanGateStatusForExactGeneration(t *testing.T) {
 	}
 }
 
+func TestServiceKeepsStaleIdentityHumanGateVisible(t *testing.T) {
+	store := newFakeStore()
+	now := time.Date(2026, 7, 17, 8, 0, 0, 0, time.UTC)
+	rec := domain.SessionRecord{ID: "project-1", ProjectID: "project", Activity: domain.Activity{State: domain.ActivityActive, LastActivityAt: now}, Metadata: domain.SessionMetadata{Generation: "g2", ExecutionProfile: domain.ExecutionProfile{Hash: "profile-2"}}}
+	store.sessions[rec.ID] = rec
+	store.gates[rec.ID] = domain.HumanGate{ID: "gate-1", SessionID: rec.ID, SourceGeneration: "g1", ProfileHash: "profile-1", State: domain.GateOpen, DetectedAt: now}
+	service := NewWithDeps(Deps{Store: store, Clock: func() time.Time { return now }})
+	got, err := service.Get(context.Background(), rec.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != domain.StatusHumanGate || got.HumanGate == nil || got.HumanGate.ID != "gate-1" {
+		t.Fatalf("stale gate was hidden: session=%+v gate=%+v", got, got.HumanGate)
+	}
+}
+
 func (f *fakeStore) CreateSession(_ context.Context, rec domain.SessionRecord) (domain.SessionRecord, error) {
 	f.num++
 	rec.ID = domain.SessionID(fmt.Sprintf("%s-%d", rec.ProjectID, f.num))

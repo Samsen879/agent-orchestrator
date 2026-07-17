@@ -44,3 +44,28 @@ func TestHumanGatePersistsAcrossRestartWithEvidenceAndEdges(t *testing.T) {
 		t.Fatalf("rehydrated gate=%+v ok=%v err=%v", got, ok, err)
 	}
 }
+
+func TestHumanGateRebindUpdatesIdentityWithoutOpenGateConflict(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	seedProject(t, s, "project")
+	rec, err := s.CreateSession(ctx, domain.SessionRecord{ProjectID: "project", Kind: domain.KindWorker, Metadata: domain.SessionMetadata{Generation: "g1", ExecutionProfile: domain.ExecutionProfile{Hash: "profile-1"}}, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	gate := domain.HumanGate{ID: "gate-rebind", DedupeKey: "gate-rebind", ProjectID: "project", SessionID: rec.ID, SourceGeneration: "g1", ProfileHash: "profile-1", Reason: domain.BlockReasonProductDecision,
+		RequiredDecision: "choose", Evidence: []domain.GateEvidence{{Kind: "request", Source: "worker", Detail: "choose"}}, AffectedTaskID: "task-a", AllowedActions: []string{"choose-a"}, State: domain.GateOpen, DetectedAt: now, UpdatedAt: now}
+	if err := s.SaveHumanGate(ctx, gate); err != nil {
+		t.Fatal(err)
+	}
+	gate.SourceGeneration, gate.ProfileHash, gate.UpdatedAt = "g2", "profile-2", now.Add(time.Minute)
+	gate.Evidence = append(gate.Evidence, domain.GateEvidence{Kind: "identity_rebound", Source: "gate_manager", Detail: "g1 to g2"})
+	if err := s.SaveHumanGate(ctx, gate); err != nil {
+		t.Fatalf("rebind save: %v", err)
+	}
+	got, ok, err := s.GetOpenHumanGateForSession(ctx, rec.ID)
+	if err != nil || !ok || got.ID != gate.ID || got.SourceGeneration != "g2" || got.ProfileHash != "profile-2" || len(got.Evidence) != 2 {
+		t.Fatalf("rebound gate=%+v ok=%v err=%v", got, ok, err)
+	}
+}

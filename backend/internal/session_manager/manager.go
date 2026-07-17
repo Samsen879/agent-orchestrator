@@ -1746,7 +1746,7 @@ func (m *Manager) send(ctx context.Context, id domain.SessionID, message, author
 			if getErr != nil {
 				return fmt.Errorf("send %s: session: %w", id, getErr)
 			}
-			if current && gate.MatchesSession(rec) && gate.ID != authorizedGateID {
+			if current && gate.ProtectsSession(rec) && gate.ID != authorizedGateID {
 				return fmt.Errorf("send %s: %w (%s)", id, ErrHumanGateOpen, gate.ID)
 			}
 		}

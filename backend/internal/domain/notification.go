@@ -59,6 +59,7 @@ type NotificationRecord struct {
 	SessionID SessionID
 	ProjectID ProjectID
 	PRURL     string
+	DedupeKey string
 	Type      NotificationType
 	Title     string
 	Body      string
@@ -85,6 +86,9 @@ func (r NotificationRecord) Validate() error {
 	}
 	if !r.Status.Valid() {
 		return ErrInvalidNotificationStatus
+	}
+	if r.Type == NotificationHumanGate && r.DedupeKey == "" {
+		return ErrInvalidNotificationRecord
 	}
 	return nil
 }

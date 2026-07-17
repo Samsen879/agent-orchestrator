@@ -685,7 +685,7 @@ func (s *Service) toSession(ctx context.Context, rec domain.SessionRecord) (doma
 		if err != nil {
 			return domain.Session{}, fmt.Errorf("human gate %s: %w", rec.ID, err)
 		}
-		if found && gate.MatchesSession(rec) {
+		if found && gate.ProtectsSession(rec) {
 			status = domain.StatusHumanGate
 			activeGate = &gate
 		}

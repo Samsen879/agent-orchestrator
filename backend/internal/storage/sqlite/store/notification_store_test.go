@@ -92,6 +92,35 @@ func TestNotificationStore_MarkReadReopensUnreadDedupe(t *testing.T) {
 	}
 }
 
+func TestNotificationStore_HumanGatesDedupeByGateIdentity(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, s, "mer")
+	sess, err := s.CreateSession(ctx, sampleRecord("mer"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	first := domain.NotificationRecord{ID: "ntf_gate_1", SessionID: sess.ID, ProjectID: sess.ProjectID, DedupeKey: "gate-1", Type: domain.NotificationHumanGate, Title: "first gate", Status: domain.NotificationUnread, CreatedAt: now}
+	if _, inserted, err := s.CreateNotification(ctx, first); err != nil || !inserted {
+		t.Fatalf("first gate inserted=%v err=%v", inserted, err)
+	}
+	duplicate := first
+	duplicate.ID = "ntf_gate_1_duplicate"
+	if _, inserted, err := s.CreateNotification(ctx, duplicate); err != nil || inserted {
+		t.Fatalf("duplicate gate inserted=%v err=%v", inserted, err)
+	}
+	second := first
+	second.ID, second.DedupeKey, second.Title = "ntf_gate_2", "gate-2", "second gate"
+	if _, inserted, err := s.CreateNotification(ctx, second); err != nil || !inserted {
+		t.Fatalf("second gate inserted=%v err=%v", inserted, err)
+	}
+	rows, err := s.ListUnreadNotifications(ctx, 10)
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("human gate notifications=%+v err=%v", rows, err)
+	}
+}
+
 func TestNotificationStore_MarkReadMissing(t *testing.T) {
 	s := newTestStore(t)
 	_, ok, err := s.MarkNotificationRead(context.Background(), "missing")

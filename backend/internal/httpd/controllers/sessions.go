@@ -111,8 +111,16 @@ func (c *SessionsController) detectGate(w http.ResponseWriter, r *http.Request) 
 		ProfileHash: in.ProfileHash, Reason: in.Reason, RequiredDecision: in.RequiredDecision, Evidence: in.Evidence, AffectedTaskID: in.AffectedTaskID,
 		DependencyEdges: in.DependencyEdges, AllowedActions: in.AllowedActions, DetectedAt: in.DetectedAt, ReminderInterval: time.Duration(in.ReminderIntervalSeconds) * time.Second, EscalationAt: in.EscalationAt})
 	if err != nil {
+		if errors.Is(err, gate.ErrInvalidSignal) {
+			envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_HUMAN_GATE_SIGNAL", err.Error(), nil)
+			return
+		}
 		if errors.Is(err, gate.ErrLaneAlreadyGated) {
 			envelope.WriteAPIError(w, r, http.StatusConflict, "conflict", "HUMAN_GATE_ALREADY_OPEN", err.Error(), nil)
+			return
+		}
+		if errors.Is(err, gate.ErrResolutionMismatch) {
+			envelope.WriteAPIError(w, r, http.StatusConflict, "conflict", "HUMAN_GATE_IDENTITY_MISMATCH", err.Error(), nil)
 			return
 		}
 		envelope.WriteError(w, r, err)
