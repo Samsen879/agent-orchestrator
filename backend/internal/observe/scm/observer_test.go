@@ -217,7 +217,7 @@ type fakeLifecycle struct {
 	err      error
 }
 
-func (l *fakeLifecycle) ApplySCMObservation(_ context.Context, _ domain.SessionID, obs ports.SCMObservation) error {
+func (l *fakeLifecycle) ApplySCMReaction(_ context.Context, _ domain.SessionRecord, obs ports.SCMObservation) error {
 	if l.err != nil {
 		return l.err
 	}

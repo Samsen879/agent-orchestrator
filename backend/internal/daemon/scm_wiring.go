@@ -7,11 +7,14 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 
 	scmgithub "github.com/aoagents/agent-orchestrator/backend/internal/adapters/scm/github"
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/lifecycle"
 	scmobserve "github.com/aoagents/agent-orchestrator/backend/internal/observe/scm"
+	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite"
 )
 
@@ -25,8 +28,41 @@ func startSCMObserver(ctx context.Context, store *sqlite.Store, lcm *lifecycle.M
 		logSCMProviderDisabled(logger, err)
 		return closedDone()
 	}
+	lcm.SetReactionPRResolver(githubReactionPRResolver{provider: provider})
 	observer := scmobserve.New(provider, store, lcm, scmobserve.Config{Logger: logger})
 	return observer.Start(ctx)
+}
+
+type githubReactionPRResolver struct {
+	provider *scmgithub.Provider
+}
+
+func (r githubReactionPRResolver) ResolveReactionPR(ctx context.Context, reaction domain.LifecycleReaction) (domain.LifecycleReactionPRTarget, error) {
+	repo, ok := r.provider.ParseRepository(reaction.Repo)
+	if !ok {
+		return domain.LifecycleReactionPRTarget{}, fmt.Errorf("resolve lifecycle reaction PR: invalid repository %q", reaction.Repo)
+	}
+	observations, err := r.provider.FetchPullRequests(ctx, []ports.SCMPRRef{{Repo: repo, Number: reaction.PRNumber, URL: reaction.PRURL}})
+	if err != nil {
+		return domain.LifecycleReactionPRTarget{}, err
+	}
+	if len(observations) == 0 || !observations[0].Fetched {
+		return domain.LifecycleReactionPRTarget{}, nil
+	}
+	o := observations[0]
+	return domain.LifecycleReactionPRTarget{
+		Found: true, URL: firstNonEmpty(o.PR.URL, o.PR.HTMLURL), Number: o.PR.Number,
+		Repo: o.Repo, SourceBranch: o.PR.SourceBranch, HeadSHA: o.PR.HeadSHA,
+	}, nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func newGitHubSCMProvider(logger *slog.Logger) (*scmgithub.Provider, error) {

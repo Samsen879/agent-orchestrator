@@ -21,6 +21,29 @@ type ChangeLog struct {
 	CreatedAt time.Time
 }
 
+type LifecycleReaction struct {
+	EventID            string
+	Version            int64
+	ProjectID          string
+	SourceSessionID    string
+	SourceGeneration   string
+	IssueID            string
+	IssueURL           string
+	PRURL              string
+	PRNumber           int64
+	Repo               string
+	Branch             string
+	HeadSha            string
+	CreatedAt          time.Time
+	ExpiresAt          time.Time
+	SuccessorSessionID string
+	SupersedesEventID  string
+	IdempotencyKey     string
+	State              string
+	Reason             string
+	DeliveredAt        sql.NullTime
+}
+
 type Notification struct {
 	ID        string
 	SessionID domain.SessionID
