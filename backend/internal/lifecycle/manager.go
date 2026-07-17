@@ -35,6 +35,14 @@ type notificationSink interface {
 	Notify(ctx context.Context, intent ports.NotificationIntent) error
 }
 
+type capacityActivitySink interface {
+	ObserveActivity(context.Context, domain.SessionRecord, ports.ActivitySignal) error
+}
+
+type capacityWaitReader interface {
+	GetCapacityWait(context.Context, domain.SessionID) (domain.CapacityWait, bool, error)
+}
+
 // Option customizes a Manager.
 type Option func(*Manager)
 
@@ -66,9 +74,17 @@ type Manager struct {
 	reactionMu    sync.Mutex
 	reactionStore reactionStore
 	reactionPR    ReactionPRResolver
+	capacitySink  capacityActivitySink
 	// flights tracks, per session, the in-flight tool executions and the
 	// pending permission dialog's identity (see toolFlight). Guarded by mu.
 	flights map[domain.SessionID]*toolFlight
+}
+
+// SetCapacityActivitySink wires successful native activity to capacity recovery.
+func (m *Manager) SetCapacityActivitySink(sink capacityActivitySink) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.capacitySink = sink
 }
 
 // New builds a Lifecycle Manager over the session store it writes and the messenger it uses for agent nudges.
@@ -114,6 +130,21 @@ func (m *Manager) mutate(ctx context.Context, id domain.SessionID, fn func(domai
 // ApplyRuntimeObservation only writes when runtime liveness is unambiguous. A
 // failed probe or liveness disagreement is ignored; no transient lifecycle state is stored.
 func (m *Manager) ApplyRuntimeObservation(ctx context.Context, id domain.SessionID, f ports.RuntimeFacts) error {
+	if reader, ok := m.store.(capacityWaitReader); ok {
+		wait, found, err := reader.GetCapacityWait(ctx, id)
+		if err != nil {
+			return err
+		}
+		if found && wait.State.Active() {
+			rec, current, getErr := m.store.GetSession(ctx, id)
+			if getErr != nil {
+				return getErr
+			}
+			if current && wait.MatchesSession(rec) {
+				return nil
+			}
+		}
+	}
 	return m.mutate(ctx, id, func(cur domain.SessionRecord, now time.Time) (domain.SessionRecord, bool) {
 		if cur.IsTerminated || !runtimeClearlyDead(f, cur.Activity, now, m.window) {
 			return cur, false
@@ -224,11 +255,15 @@ func (m *Manager) ApplyActivitySignal(ctx context.Context, id domain.SessionID, 
 		}
 	}
 	waitingEvents := m.waitingInputEvents(next, prevState, prevAt, now)
+	capacitySink := m.capacitySink
 	m.mu.Unlock()
 	for _, ev := range waitingEvents {
 		m.emitTelemetry(ctx, ev)
 	}
 	m.emitNotification(ctx, intent)
+	if capacitySink != nil {
+		return capacitySink.ObserveActivity(ctx, next, s)
+	}
 	return nil
 }
 

@@ -126,10 +126,14 @@ type CleanupSessionsQuery struct {
 // fields are json:"-"; these curated fields are what serialize.
 type SessionView struct {
 	domain.Session
-	Branch                       string                  `json:"branch,omitempty"`
-	ExecutionProfile             domain.ExecutionProfile `json:"executionProfile"`
-	ObservedExecutionProfileHash string                  `json:"observedExecutionProfileHash,omitempty"`
-	ExecutionProfileDrift        bool                    `json:"executionProfileDrift"`
+	Branch                       string                   `json:"branch,omitempty"`
+	ExecutionProfile             domain.ExecutionProfile  `json:"executionProfile"`
+	ObservedExecutionProfileHash string                   `json:"observedExecutionProfileHash,omitempty"`
+	ExecutionProfileDrift        bool                     `json:"executionProfileDrift"`
+	CapacityWaitState            domain.CapacityWaitState `json:"capacityWaitState,omitempty"`
+	CapacityWaitReason           string                   `json:"capacityWaitReason,omitempty"`
+	CapacityNextProbeAt          *time.Time               `json:"capacityNextProbeAt,omitempty"`
+	CapacityAttemptCount         int                      `json:"capacityAttemptCount,omitempty"`
 	// PreviewURL is the browser preview target the desktop app opens for this
 	// session, set via POST /sessions/{sessionId}/preview. Empty (omitted) when
 	// no preview has been requested. Pulled from the json:"-" domain Metadata.
@@ -520,7 +524,7 @@ type NotificationResponse struct {
 	SessionID string             `json:"sessionId"`
 	ProjectID string             `json:"projectId"`
 	PRURL     string             `json:"prUrl"`
-	Type      string             `json:"type" enum:"needs_input,ready_to_merge,pr_merged,pr_closed_unmerged"`
+	Type      string             `json:"type" enum:"needs_input,ready_to_merge,pr_merged,pr_closed_unmerged,capacity_wait"`
 	Title     string             `json:"title"`
 	Body      string             `json:"body"`
 	Status    string             `json:"status" enum:"unread,read"`

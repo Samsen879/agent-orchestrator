@@ -166,7 +166,7 @@ func (c *commandContext) runDoctor(ctx context.Context) []doctorCheck {
 		}
 		checks = append(checks, doctorCheck{Level: level, Section: doctorSectionCore, Name: "daemon", Message: msg})
 		if st.State == stateReady {
-			checks = append(checks, c.checkExecutionProfiles(ctx))
+			checks = append(checks, c.checkExecutionProfiles(ctx), c.checkCapacityWaits(ctx))
 		}
 	}
 
@@ -181,6 +181,28 @@ func (c *commandContext) runDoctor(ctx context.Context) []doctorCheck {
 	}
 	checks = append(checks, c.checkCodexLaunchFlags(ctx), c.checkGitHubToken(ctx))
 	return checks
+}
+
+func (c *commandContext) checkCapacityWaits(ctx context.Context) doctorCheck {
+	var response sessionListResponse
+	if err := c.getJSON(ctx, "sessions", &response); err != nil {
+		return doctorCheck{Level: doctorWarn, Section: doctorSectionCore, Name: "capacity-waits", Message: err.Error()}
+	}
+	var waits []string
+	for _, session := range response.Sessions {
+		if session.CapacityWaitState == "" {
+			continue
+		}
+		next := "unscheduled"
+		if session.CapacityNextProbeAt != nil {
+			next = session.CapacityNextProbeAt.UTC().Format(time.RFC3339)
+		}
+		waits = append(waits, fmt.Sprintf("%s state=%s attempt=%d next=%s reason=%s", session.ID, session.CapacityWaitState, session.CapacityAttemptCount, next, session.CapacityWaitReason))
+	}
+	if len(waits) == 0 {
+		return doctorCheck{Level: doctorPass, Section: doctorSectionCore, Name: "capacity-waits", Message: "no active provider-capacity waits"}
+	}
+	return doctorCheck{Level: doctorWarn, Section: doctorSectionCore, Name: "capacity-waits", Message: strings.Join(waits, "; ")}
 }
 
 func (c *commandContext) checkLauncherEntrypoint() doctorCheck {

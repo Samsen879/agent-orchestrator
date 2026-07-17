@@ -17,13 +17,54 @@ type fakeStore struct {
 	sessions   map[domain.SessionID]domain.SessionRecord
 	prs        map[domain.SessionID][]domain.PullRequest
 	signatures map[string]string
+	waits      map[domain.SessionID]domain.CapacityWait
 
 	signatureWriteErr error
 	signatureWrites   int
 }
 
 func newFakeStore() *fakeStore {
-	return &fakeStore{sessions: map[domain.SessionID]domain.SessionRecord{}, prs: map[domain.SessionID][]domain.PullRequest{}, signatures: map[string]string{}}
+	return &fakeStore{sessions: map[domain.SessionID]domain.SessionRecord{}, prs: map[domain.SessionID][]domain.PullRequest{}, signatures: map[string]string{}, waits: map[domain.SessionID]domain.CapacityWait{}}
+}
+
+func (f *fakeStore) GetCapacityWait(_ context.Context, id domain.SessionID) (domain.CapacityWait, bool, error) {
+	wait, ok := f.waits[id]
+	return wait, ok, nil
+}
+
+func TestRuntimeDeathDoesNotTerminateActiveCapacityWait(t *testing.T) {
+	m, st, _ := newManager()
+	rec := working("mer-1")
+	rec.Metadata.Generation = "generation-1"
+	rec.Metadata.AgentSessionID = "thread-1"
+	rec.Metadata.WorkspacePath = "/wt/mer-1"
+	rec.Metadata.Branch = "task/1602"
+	rec.Metadata.ExecutionProfile.Hash = "profile-1"
+	rec.Metadata.ObservedExecutionProfileHash = "profile-1"
+	rec.Activity = domain.Activity{State: domain.ActivityIdle, LastActivityAt: time.Now().Add(-time.Hour)}
+	st.sessions[rec.ID] = rec
+	st.waits[rec.ID] = domain.CapacityWait{SessionID: rec.ID, SourceGeneration: rec.Metadata.Generation, AgentSessionID: "thread-1", WorkspacePath: "/wt/mer-1", Branch: "task/1602", ProfileHash: "profile-1", State: domain.CapacityWaitScheduled}
+	if err := m.ApplyRuntimeObservation(ctx, rec.ID, ports.RuntimeFacts{Probe: ports.ProbeDead, ObservedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if st.sessions[rec.ID].IsTerminated {
+		t.Fatal("capacity-waiting session was marked terminated")
+	}
+}
+
+func TestRuntimeDeathIgnoresStaleCapacityWait(t *testing.T) {
+	m, st, _ := newManager()
+	rec := working("mer-1")
+	rec.Metadata.Generation = "generation-2"
+	rec.Activity = domain.Activity{State: domain.ActivityIdle, LastActivityAt: time.Now().Add(-time.Hour)}
+	st.sessions[rec.ID] = rec
+	st.waits[rec.ID] = domain.CapacityWait{SessionID: rec.ID, SourceGeneration: "generation-1", State: domain.CapacityWaitScheduled}
+	if err := m.ApplyRuntimeObservation(ctx, rec.ID, ports.RuntimeFacts{Probe: ports.ProbeDead, ObservedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if !st.sessions[rec.ID].IsTerminated {
+		t.Fatal("stale capacity wait suppressed current-generation runtime death")
+	}
 }
 
 func (f *fakeStore) GetSession(_ context.Context, id domain.SessionID) (domain.SessionRecord, bool, error) {

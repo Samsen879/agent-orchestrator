@@ -29,6 +29,7 @@ type fakeStore struct {
 	reviews  map[string][]domain.PullRequestReview
 	threads  map[string][]domain.PullRequestReviewThread
 	comments map[string][]domain.PullRequestComment
+	waits    map[domain.SessionID]domain.CapacityWait
 	num      int
 }
 
@@ -41,6 +42,28 @@ func newFakeStore() *fakeStore {
 		reviews:  map[string][]domain.PullRequestReview{},
 		threads:  map[string][]domain.PullRequestReviewThread{},
 		comments: map[string][]domain.PullRequestComment{},
+		waits:    map[domain.SessionID]domain.CapacityWait{},
+	}
+}
+
+func (f *fakeStore) GetCapacityWait(_ context.Context, id domain.SessionID) (domain.CapacityWait, bool, error) {
+	wait, ok := f.waits[id]
+	return wait, ok, nil
+}
+
+func TestServiceDerivesCapacityWaitStatusFromDurableEpisode(t *testing.T) {
+	store := newFakeStore()
+	now := time.Date(2026, 7, 17, 8, 0, 0, 0, time.UTC)
+	store.sessions["project-1"] = domain.SessionRecord{ID: "project-1", ProjectID: "project", Activity: domain.Activity{State: domain.ActivityActive, LastActivityAt: now}, Metadata: domain.SessionMetadata{Generation: "generation-1", AgentSessionID: "thread-1", WorkspacePath: "/wt/project-1", Branch: "task/1602", ExecutionProfile: domain.ExecutionProfile{Hash: "profile-1"}, ObservedExecutionProfileHash: "profile-1"}}
+	store.waits["project-1"] = domain.CapacityWait{SessionID: "project-1", SourceGeneration: "generation-1", AgentSessionID: "thread-1", WorkspacePath: "/wt/project-1", Branch: "task/1602", ProfileHash: "profile-1", State: domain.CapacityWaitScheduled, SourceError: "429 Too Many Requests", NextProbeAt: now.Add(time.Minute), AttemptCount: 2}
+	service := NewWithDeps(Deps{Store: store, Clock: func() time.Time { return now }})
+
+	got, err := service.Get(context.Background(), "project-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != domain.StatusCapacityWait || got.CapacityWait == nil || got.CapacityWait.NextProbeAt != now.Add(time.Minute) || got.CapacityWait.AttemptCount != 2 {
+		t.Fatalf("session = %+v wait=%+v", got, got.CapacityWait)
 	}
 }
 

@@ -9,6 +9,7 @@ export type SessionStatus =
 	| "mergeable"
 	| "merged"
 	| "needs_input"
+	| "capacity_wait"
 	| "no_signal"
 	| "idle"
 	| "terminated"
@@ -25,6 +26,7 @@ const sessionStatuses = new Set<SessionStatus>([
 	"mergeable",
 	"merged",
 	"needs_input",
+	"capacity_wait",
 	"no_signal",
 	"idle",
 	"terminated",
@@ -141,6 +143,10 @@ export type WorkspaceSession = {
 	 * a repeated preview of the same target.
 	 */
 	previewRevision?: number;
+	capacityWaitState?: string;
+	capacityWaitReason?: string;
+	capacityNextProbeAt?: string;
+	capacityAttemptCount?: number;
 	/** The session's git diff against its base, when known. */
 	changedFiles?: ChangedFile[];
 	/** Pre-filled commit subject for the Git rail, when known. */
@@ -348,6 +354,7 @@ export function attentionZone(session: WorkspaceSession): AttentionZone {
 			return "action";
 		// Waiting on an external reviewer / CI — nothing to do right now.
 		case "review_pending":
+		case "capacity_wait":
 		case "pr_open":
 		case "draft":
 		case "unknown":
