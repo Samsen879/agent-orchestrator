@@ -61,7 +61,7 @@ type Store interface {
 
 // Lifecycle is the provider-neutral lifecycle notification sink.
 type Lifecycle interface {
-	ApplySCMObservation(ctx context.Context, sessionID domain.SessionID, obs ports.SCMObservation) error
+	ApplySCMReaction(ctx context.Context, source domain.SessionRecord, obs ports.SCMObservation) error
 }
 
 type credentialChecker interface {
@@ -380,7 +380,7 @@ func (o *Observer) Poll(ctx context.Context) error {
 			continue
 		}
 		if o.lifecycle != nil {
-			if err := o.lifecycle.ApplySCMObservation(ctx, subj.session.ID, prepared); err != nil {
+			if err := o.lifecycle.ApplySCMReaction(ctx, subj.session, prepared); err != nil {
 				o.logger.Error("scm observer: lifecycle notification failed", "session", subj.session.ID, "pr", firstNonEmpty(prepared.PR.URL, prepared.PR.HTMLURL, local.URL), "err", err)
 				markRepoRefreshFailed(subj.repo)
 				continue

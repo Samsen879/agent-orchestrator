@@ -58,11 +58,14 @@ type Manager struct {
 	guard         *sessionguard.Guard
 	notifications notificationSink
 
-	mu        sync.Mutex
-	window    time.Duration
-	clock     func() time.Time
-	react     reactionState
-	telemetry ports.EventSink
+	mu            sync.Mutex
+	window        time.Duration
+	clock         func() time.Time
+	react         reactionState
+	telemetry     ports.EventSink
+	reactionMu    sync.Mutex
+	reactionStore reactionStore
+	reactionPR    ReactionPRResolver
 	// flights tracks, per session, the in-flight tool executions and the
 	// pending permission dialog's identity (see toolFlight). Guarded by mu.
 	flights map[domain.SessionID]*toolFlight
@@ -76,6 +79,9 @@ func New(store sessionStore, messenger ports.AgentMessenger, opts ...Option) *Ma
 	// WithClock option may still override this in tests.
 	clock := func() time.Time { return time.Now().UTC() }
 	m := &Manager{store: store, window: defaultRecentActivityWindow, clock: clock, react: newReactionState(), flights: map[domain.SessionID]*toolFlight{}}
+	if rs, ok := store.(reactionStore); ok {
+		m.reactionStore = rs
+	}
 	if messenger != nil {
 		m.guard = sessionguard.New(store, messenger, nil)
 	}

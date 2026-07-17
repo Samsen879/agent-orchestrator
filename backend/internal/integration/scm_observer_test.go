@@ -127,6 +127,19 @@ func (p *cannedSCMProvider) FetchPullRequests(_ context.Context, refs []ports.SC
 	return out, nil
 }
 
+func (p *cannedSCMProvider) ResolveReactionPR(_ context.Context, reaction domain.LifecycleReaction) (domain.LifecycleReactionPRTarget, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	obs, ok := p.observations[reaction.PRNumber]
+	if !ok {
+		return domain.LifecycleReactionPRTarget{}, nil
+	}
+	return domain.LifecycleReactionPRTarget{
+		Found: true, URL: obs.PR.URL, Number: obs.PR.Number, Repo: obs.Repo,
+		SourceBranch: obs.PR.SourceBranch, HeadSHA: obs.PR.HeadSHA,
+	}, nil
+}
+
 func (p *cannedSCMProvider) FetchFailedCheckLogTail(_ context.Context, _ ports.SCMRepo, _ ports.SCMCheckObservation) (string, error) {
 	// Observations in this test always carry their LogTail inline, so the
 	// observer's failed-log enrichment short-circuits without calling here.
@@ -177,7 +190,9 @@ func newSCMFixture(t *testing.T, branch string) *scmFixture {
 	sess, err := store.CreateSession(ctx, domain.SessionRecord{
 		ProjectID: "octo",
 		Kind:      domain.KindWorker,
-		Metadata:  domain.SessionMetadata{Branch: branch, WorkspacePath: "/ws/octo"},
+		Metadata: domain.SessionMetadata{
+			Generation: "generation-1", Branch: branch, WorkspacePath: "/ws/octo", RuntimeHandleID: "runtime-1",
+		},
 		CreatedAt: now,
 		UpdatedAt: now,
 	})
@@ -188,6 +203,7 @@ func newSCMFixture(t *testing.T, branch string) *scmFixture {
 	spy := &scmMessengerSpy{}
 	lcm := lifecycle.New(store, spy)
 	provider := newCannedSCMProvider()
+	lcm.SetReactionPRResolver(provider)
 	observer := scmobserve.New(provider, store, lcm, scmobserve.Config{
 		Tick:   time.Hour,
 		Clock:  func() time.Time { return now },

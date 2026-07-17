@@ -323,6 +323,41 @@ func (m *Manager) ApplySCMObservation(ctx context.Context, id domain.SessionID, 
 	if !o.Fetched {
 		return nil
 	}
+	rec, ok, err := m.store.GetSession(ctx, id)
+	if err != nil || !ok {
+		return err
+	}
+	if rec.Metadata.Generation != "" && rec.Metadata.RuntimeHandleID != "" && m.reactionStore != nil {
+		return m.ApplySCMReaction(ctx, rec, o)
+	}
+	return m.applyCurrentSCMObservation(ctx, id, o)
+}
+
+// ApplySCMReaction routes an SCM observation against the exact durable worker
+// generation that produced it. The observer must pass its original session
+// snapshot so a delayed poll cannot silently bind to a replacement worker.
+func (m *Manager) ApplySCMReaction(ctx context.Context, source domain.SessionRecord, o ports.SCMObservation) error {
+	if !o.Fetched {
+		return nil
+	}
+	if err := requireReactionSource(source); err != nil {
+		return err
+	}
+	identity := o
+	identity.ObservedAt = time.Time{}
+	reaction := reactionEnvelope(source, "scm", m.clock(), identity)
+	reaction.PRURL = firstSCMNonEmpty(o.PR.URL, o.PR.HTMLURL)
+	reaction.PRNumber = o.PR.Number
+	reaction.Repo = o.Repo
+	reaction.Branch = o.PR.SourceBranch
+	reaction.HeadSHA = o.PR.HeadSHA
+	_, err := m.RouteReaction(ctx, reaction, func() error {
+		return m.applyCurrentSCMObservation(ctx, source.ID, o)
+	})
+	return err
+}
+
+func (m *Manager) applyCurrentSCMObservation(ctx context.Context, id domain.SessionID, o ports.SCMObservation) error {
 	if err := m.ApplyPRObservation(ctx, id, scmToPRObservation(o)); err != nil {
 		return err
 	}
