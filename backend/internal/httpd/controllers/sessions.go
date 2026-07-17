@@ -768,7 +768,15 @@ func sessionView(s domain.Session) SessionView {
 	profile := s.Metadata.ExecutionProfile
 	observed := s.Metadata.ObservedExecutionProfileHash
 	drift := profile.IsZero() || profile.Validate() != nil || observed != profile.Hash
-	return SessionView{Session: s, Branch: s.Metadata.Branch, ExecutionProfile: profile, ObservedExecutionProfileHash: observed, ExecutionProfileDrift: drift, PreviewURL: s.Metadata.PreviewURL, PreviewRevision: s.Metadata.PreviewRevision, PRs: sessionPRFacts(s.PRs)}
+	view := SessionView{Session: s, Branch: s.Metadata.Branch, ExecutionProfile: profile, ObservedExecutionProfileHash: observed, ExecutionProfileDrift: drift, PreviewURL: s.Metadata.PreviewURL, PreviewRevision: s.Metadata.PreviewRevision, PRs: sessionPRFacts(s.PRs)}
+	if s.CapacityWait != nil {
+		view.CapacityWaitState = s.CapacityWait.State
+		view.CapacityWaitReason = s.CapacityWait.SourceError
+		next := s.CapacityWait.NextProbeAt
+		view.CapacityNextProbeAt = &next
+		view.CapacityAttemptCount = s.CapacityWait.AttemptCount
+	}
+	return view
 }
 
 func sessionViews(sessions []domain.Session) []SessionView {

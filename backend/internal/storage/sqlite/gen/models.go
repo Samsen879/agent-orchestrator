@@ -12,6 +12,27 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
 
+type CapacityWait struct {
+	SessionID         string
+	EpisodeID         string
+	ProjectID         string
+	SourceGeneration  string
+	AgentSessionID    string
+	WorkspacePath     string
+	Branch            string
+	ProfileHash       string
+	State             string
+	ErrorClass        string
+	SourceError       string
+	RuntimeHandleID   string
+	OutputFingerprint string
+	NextProbeAt       time.Time
+	AttemptCount      int64
+	NotifiedAt        sql.NullTime
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+}
+
 type ChangeLog struct {
 	Seq       int64
 	ProjectID domain.ProjectID

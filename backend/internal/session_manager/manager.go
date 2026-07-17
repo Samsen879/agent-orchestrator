@@ -57,6 +57,9 @@ var (
 	// would answer it on the user's behalf. The API maps it to a 409; the
 	// caller retries once the user has answered in the terminal.
 	ErrAwaitingDecision = errors.New("session: awaiting a user decision")
+	// ErrCapacityIdentityMismatch means a scheduled recovery no longer matches
+	// the durable session generation, thread, workspace, branch, or profile.
+	ErrCapacityIdentityMismatch = errors.New("session: capacity recovery identity mismatch")
 )
 
 // Env vars a spawned process reads to learn who it is.
@@ -140,6 +143,10 @@ type Store interface {
 	// Kill and successful RestoreAll must remove these rows to prevent
 	// resurrecting sessions the user intentionally terminated.
 	DeleteSessionWorktrees(ctx context.Context, id domain.SessionID) error
+}
+
+type capacityWaitReader interface {
+	GetCapacityWait(context.Context, domain.SessionID) (domain.CapacityWait, bool, error)
 }
 
 // Manager coordinates internal session spawn, restore, kill, and cleanup over
@@ -964,10 +971,46 @@ func (m *Manager) Restore(ctx context.Context, id domain.SessionID) (domain.Sess
 	if err != nil {
 		return domain.SessionRecord{}, fmt.Errorf("restore %s: workspace: %w", id, err)
 	}
-	return m.relaunchRestoredSession(ctx, rec, project, ws)
+	return m.relaunchRestoredSession(ctx, rec, project, ws, false)
 }
 
-func (m *Manager) relaunchRestoredSession(ctx context.Context, rec domain.SessionRecord, project domain.ProjectRecord, ws ports.WorkspaceInfo) (domain.SessionRecord, error) {
+// ResumeCapacity relaunches exactly the capacity episode's session and native
+// thread in its existing worktree, then submits a continuation instruction.
+func (m *Manager) ResumeCapacity(ctx context.Context, wait domain.CapacityWait) error {
+	rec, ok, err := m.store.GetSession(ctx, wait.SessionID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return ErrNotFound
+	}
+	profile := rec.Metadata.ExecutionProfile
+	if rec.IsTerminated || rec.Kind != domain.KindWorker || rec.Harness != domain.HarnessCodex ||
+		rec.Metadata.Generation != wait.SourceGeneration || rec.Metadata.AgentSessionID == "" || rec.Metadata.AgentSessionID != wait.AgentSessionID ||
+		rec.Metadata.WorkspacePath != wait.WorkspacePath || rec.Metadata.Branch != wait.Branch || profile.Hash != wait.ProfileHash ||
+		rec.Metadata.ObservedExecutionProfileHash != profile.Hash || profile.Validate() != nil {
+		return ErrCapacityIdentityMismatch
+	}
+	project, err := m.loadProject(ctx, rec.ProjectID)
+	if err != nil {
+		return err
+	}
+	if rec.Metadata.RuntimeHandleID != "" {
+		if err := m.runtime.Destroy(ctx, runtimeHandle(rec.Metadata)); err != nil {
+			return fmt.Errorf("capacity resume %s: destroy old runtime: %w", rec.ID, err)
+		}
+	}
+	resumed, err := m.relaunchRestoredSession(ctx, rec, project, workspaceInfo(rec), true)
+	if err != nil {
+		return fmt.Errorf("capacity resume %s: %w", rec.ID, err)
+	}
+	if resumed.ID != rec.ID || resumed.Metadata.AgentSessionID != wait.AgentSessionID || resumed.Metadata.ExecutionProfile.Hash != wait.ProfileHash {
+		return ErrCapacityIdentityMismatch
+	}
+	return m.Send(ctx, rec.ID, "Continue from the provider-capacity interruption. Keep the current task, worktree, and execution profile unchanged.")
+}
+
+func (m *Manager) relaunchRestoredSession(ctx context.Context, rec domain.SessionRecord, project domain.ProjectRecord, ws ports.WorkspaceInfo, nativeOnly bool) (domain.SessionRecord, error) {
 	agent, ok := m.agents.Agent(rec.Harness)
 	if !ok {
 		return domain.SessionRecord{}, fmt.Errorf("restore %s: no agent adapter for harness %q", rec.ID, rec.Harness)
@@ -994,7 +1037,7 @@ func (m *Manager) relaunchRestoredSession(ctx context.Context, rec domain.Sessio
 	if err := m.prepareWorkspace(ctx, agent, rec.ID, ws.Path, systemPrompt, systemPromptFile, agentConfig, env); err != nil {
 		return domain.SessionRecord{}, fmt.Errorf("restore %s: %w", rec.ID, err)
 	}
-	argv, delivery, err := restoreArgv(ctx, agent, rec.ID, ws.Path, rec.Metadata, systemPrompt, systemPromptFile, agentConfig, rec.Metadata.ExecutionProfile, rec.Kind, m.dataDir)
+	argv, delivery, err := restoreArgv(ctx, agent, rec.ID, ws.Path, rec.Metadata, systemPrompt, systemPromptFile, agentConfig, rec.Metadata.ExecutionProfile, rec.Kind, m.dataDir, nativeOnly)
 	if err != nil {
 		m.cleanupSystemPromptDir(rec.ID)
 		return domain.SessionRecord{}, fmt.Errorf("restore %s: %w", rec.ID, err)
@@ -1162,6 +1205,18 @@ func (m *Manager) reconcileLive(ctx context.Context, rec domain.SessionRecord) e
 		}
 		if alive {
 			return nil // adopt: the session survived the crash.
+		}
+	}
+	if reader, ok := m.store.(capacityWaitReader); ok {
+		wait, found, err := reader.GetCapacityWait(ctx, rec.ID)
+		if err != nil {
+			return fmt.Errorf("reconcile %s: capacity wait: %w", rec.ID, err)
+		}
+		if found && wait.State.Active() && wait.MatchesSession(rec) {
+			// Provider-capacity exits are recovered by the durable scheduler after
+			// boot. Preserve the original worktree and live lifecycle row so the
+			// reaction router can relaunch this exact generation and native thread.
+			return nil
 		}
 	}
 	if err := m.saveAndTeardownOne(ctx, rec, false); err != nil {
@@ -1335,7 +1390,7 @@ func (m *Manager) RestoreAll(ctx context.Context) error {
 		}
 
 		// Step 3: relaunch the agent in the restored workspace.
-		if _, err := m.relaunchRestoredSession(ctx, rec, project, ws); err != nil {
+		if _, err := m.relaunchRestoredSession(ctx, rec, project, ws, false); err != nil {
 			// A promptless, unresumable worker is intentionally left terminated
 			// (ErrNotResumable): expected, not an operational failure, so log it
 			// quietly rather than as an error.
@@ -2612,7 +2667,7 @@ func sleepContext(ctx context.Context, d time.Duration) error {
 // a worker with no prompt and no native session id has nothing to restore from.
 // Orchestrators are promptless by design and always relaunch fresh with the
 // system prompt only.
-func restoreArgv(ctx context.Context, agent ports.Agent, id domain.SessionID, workspacePath string, meta domain.SessionMetadata, systemPrompt, systemPromptFile string, agentConfig ports.AgentConfig, profile domain.ExecutionProfile, kind domain.SessionKind, dataDir string) ([]string, ports.PromptDeliveryStrategy, error) {
+func restoreArgv(ctx context.Context, agent ports.Agent, id domain.SessionID, workspacePath string, meta domain.SessionMetadata, systemPrompt, systemPromptFile string, agentConfig ports.AgentConfig, profile domain.ExecutionProfile, kind domain.SessionKind, dataDir string, nativeOnly bool) ([]string, ports.PromptDeliveryStrategy, error) {
 	ref := ports.SessionRef{
 		ID:            string(id),
 		WorkspacePath: workspacePath,
@@ -2632,6 +2687,9 @@ func restoreArgv(ctx context.Context, agent ports.Agent, id domain.SessionID, wo
 	}
 	if ok {
 		return cmd, ports.PromptDeliveryInCommand, nil
+	}
+	if nativeOnly {
+		return nil, "", ErrNotResumable
 	}
 	// Adapter cannot resume. A saved prompt is replayed fresh. An orchestrator is
 	// promptless by design and relaunches with the system prompt only. A promptless

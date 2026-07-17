@@ -32,6 +32,10 @@ type Store interface {
 	GetProject(ctx context.Context, id string) (domain.ProjectRecord, bool, error)
 }
 
+type capacityWaitReader interface {
+	GetCapacityWait(context.Context, domain.SessionID) (domain.CapacityWait, bool, error)
+}
+
 // ListFilter captures API-facing session list query filters.
 type ListFilter struct {
 	ProjectID        domain.ProjectID
@@ -657,7 +661,19 @@ func (s *Service) toSession(ctx context.Context, rec domain.SessionRecord) (doma
 	if err != nil {
 		return domain.Session{}, fmt.Errorf("pr facts %s: %w", rec.ID, err)
 	}
-	return domain.Session{SessionRecord: rec, Status: deriveStatus(rec, prs, s.now(), s.harnessSignals(rec.Harness)), TerminalHandleID: rec.Metadata.RuntimeHandleID, PRs: prs}, nil
+	status := deriveStatus(rec, prs, s.now(), s.harnessSignals(rec.Harness))
+	var activeWait *domain.CapacityWait
+	if reader, ok := s.store.(capacityWaitReader); ok {
+		wait, waiting, err := reader.GetCapacityWait(ctx, rec.ID)
+		if err != nil {
+			return domain.Session{}, fmt.Errorf("capacity wait %s: %w", rec.ID, err)
+		}
+		if waiting && wait.State.Active() && wait.MatchesSession(rec) {
+			status = domain.StatusCapacityWait
+			activeWait = &wait
+		}
+	}
+	return domain.Session{SessionRecord: rec, Status: status, TerminalHandleID: rec.Metadata.RuntimeHandleID, CapacityWait: activeWait, PRs: prs}, nil
 }
 
 // now tolerates a zero-value Service (tests construct the struct literally

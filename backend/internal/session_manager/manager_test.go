@@ -23,6 +23,7 @@ var ctx = context.Background()
 
 type fakeStore struct {
 	sessions      map[domain.SessionID]domain.SessionRecord
+	waits         map[domain.SessionID]domain.CapacityWait
 	pr            map[domain.SessionID]domain.PRFacts
 	projects      map[string]domain.ProjectRecord
 	workspaceRepo map[string][]domain.WorkspaceRepoRecord
@@ -41,12 +42,17 @@ type fakeStore struct {
 func newFakeStore() *fakeStore {
 	return &fakeStore{
 		sessions:      map[domain.SessionID]domain.SessionRecord{},
+		waits:         map[domain.SessionID]domain.CapacityWait{},
 		pr:            map[domain.SessionID]domain.PRFacts{},
 		projects:      map[string]domain.ProjectRecord{},
 		workspaceRepo: map[string][]domain.WorkspaceRepoRecord{},
 		worktrees:     map[domain.SessionID][]domain.SessionWorktreeRecord{},
 		reservations:  map[string]domain.SpawnReservation{},
 	}
+}
+func (f *fakeStore) GetCapacityWait(_ context.Context, id domain.SessionID) (domain.CapacityWait, bool, error) {
+	wait, ok := f.waits[id]
+	return wait, ok, nil
 }
 func (f *fakeStore) ReserveSpawn(_ context.Context, projectID domain.ProjectID, requestID, generation string, now time.Time) (domain.SpawnReservation, bool, error) {
 	if existing, ok := f.reservations[requestID]; ok {
@@ -704,6 +710,64 @@ func testRoleAgents() domain.ProjectConfig {
 	return domain.ProjectConfig{
 		Worker:       domain.RoleOverride{Harness: domain.HarnessClaudeCode},
 		Orchestrator: domain.RoleOverride{Harness: domain.HarnessClaudeCode},
+	}
+}
+
+func TestResumeCapacityPreservesNativeThreadWorkspaceAndProfile(t *testing.T) {
+	st := newFakeStore()
+	profile, err := domain.NewExecutionProfile(domain.AgentConfig{Model: "gpt-5.4", ReasoningEffort: "high", FastMode: true, ReviewModel: "gpt-5.4-review"}, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Config: domain.ProjectConfig{Worker: domain.RoleOverride{Harness: domain.HarnessCodex}}}
+	rec := domain.SessionRecord{
+		ID: "mer-1", ProjectID: "mer", Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+		Metadata: domain.SessionMetadata{
+			Generation: "generation-1", Branch: "task/1602", WorkspacePath: "/ws/mer-1", RuntimeHandleID: "old-runtime", AgentSessionID: "thread-1",
+			ExecutionProfile: profile, ObservedExecutionProfileHash: profile.Hash,
+		},
+		Activity: domain.Activity{State: domain.ActivityIdle},
+	}
+	st.sessions[rec.ID] = rec
+	agent := &recordingAgent{}
+	rt := &fakeRuntime{}
+	msg := &fakeMessenger{}
+	m := New(Deps{
+		Runtime: rt, Agents: singleAgent{agent: agent}, Workspace: &fakeWorkspace{}, Store: st, Messenger: msg,
+		Lifecycle: &fakeLCM{store: st}, LookPath: func(string) (string, error) { return "/bin/true", nil },
+	})
+	wait := domain.CapacityWait{
+		SessionID: rec.ID, SourceGeneration: rec.Metadata.Generation, AgentSessionID: rec.Metadata.AgentSessionID,
+		WorkspacePath: rec.Metadata.WorkspacePath, Branch: rec.Metadata.Branch, ProfileHash: profile.Hash,
+	}
+
+	if err := m.ResumeCapacity(ctx, wait); err != nil {
+		t.Fatalf("ResumeCapacity: %v", err)
+	}
+	if len(rt.destroyedIDs) != 1 || rt.destroyedIDs[0] != "old-runtime" || rt.lastCfg.SessionID != rec.ID || rt.lastCfg.WorkspacePath != rec.Metadata.WorkspacePath {
+		t.Fatalf("runtime identity changed: destroyed=%v cfg=%+v", rt.destroyedIDs, rt.lastCfg)
+	}
+	if agent.lastRestore.Session.Metadata[ports.MetadataKeyAgentSessionID] != "thread-1" || agent.lastRestore.ExecutionProfile.Hash != profile.Hash {
+		t.Fatalf("restore identity/profile = %+v", agent.lastRestore)
+	}
+	if agent.lastRestore.ExecutionProfile.Model != "gpt-5.4" || agent.lastRestore.ExecutionProfile.ReasoningEffort != "high" || !agent.lastRestore.ExecutionProfile.FastMode || agent.lastRestore.ExecutionProfile.ReviewModel != "gpt-5.4-review" {
+		t.Fatalf("execution profile changed: %+v", agent.lastRestore.ExecutionProfile)
+	}
+	if len(msg.msgs) != 1 || !strings.Contains(msg.msgs[0], "provider-capacity interruption") {
+		t.Fatalf("continuation messages = %v", msg.msgs)
+	}
+}
+
+func TestResumeCapacityFailsClosedOnProfileDrift(t *testing.T) {
+	m, st, rt, _ := newManager()
+	profile, _ := domain.NewExecutionProfile(domain.AgentConfig{Model: "gpt-5.4"}, "test")
+	st.sessions["mer-1"] = domain.SessionRecord{
+		ID: "mer-1", ProjectID: "mer", Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+		Metadata: domain.SessionMetadata{Generation: "g1", Branch: "task/1602", WorkspacePath: "/ws/mer-1", RuntimeHandleID: "h1", AgentSessionID: "thread-1", ExecutionProfile: profile, ObservedExecutionProfileHash: "different"},
+	}
+	err := m.ResumeCapacity(ctx, domain.CapacityWait{SessionID: "mer-1", SourceGeneration: "g1", AgentSessionID: "thread-1", WorkspacePath: "/ws/mer-1", Branch: "task/1602", ProfileHash: profile.Hash})
+	if !errors.Is(err, ErrCapacityIdentityMismatch) || rt.destroyed != 0 || rt.created != 0 {
+		t.Fatalf("err=%v destroyed=%d created=%d", err, rt.destroyed, rt.created)
 	}
 }
 func seedTerminal(st *fakeStore, id domain.SessionID, meta domain.SessionMetadata) {
@@ -4277,6 +4341,40 @@ func TestReconcileLive_AliveSessionAdoptedNoop(t *testing.T) {
 	}
 	if ws.stashCalls != 0 || lcm.terminated["s2"] != 0 || rt.destroyed != 0 {
 		t.Fatalf("adopt should be a no-op: stash=%d term=%d destroy=%d", ws.stashCalls, lcm.terminated["s2"], rt.destroyed)
+	}
+}
+
+func TestReconcile_ActiveCapacityWaitPreservesIdentityForScheduler(t *testing.T) {
+	st := newFakeStore()
+	rt := &fakeRuntime{aliveByHandle: map[string]bool{}}
+	ws := &fakeWorkspace{}
+	lcm := &fakeLCM{store: st}
+	m := New(Deps{Runtime: rt, Agents: fakeAgents{}, Workspace: ws, Store: st, Messenger: &fakeMessenger{}, Lifecycle: lcm, LookPath: func(string) (string, error) { return "/bin/true", nil }})
+
+	profile := domain.ExecutionProfile{Hash: "profile-hash"}
+	rec := domain.SessionRecord{
+		ID: "s-capacity", ProjectID: "p1", Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+		Metadata: domain.SessionMetadata{
+			Generation: "generation-1", AgentSessionID: "thread-1", Branch: "task/1602",
+			WorkspacePath: "/wt/s-capacity", RuntimeHandleID: "runtime-1",
+			ExecutionProfile: profile, ObservedExecutionProfileHash: profile.Hash,
+		},
+	}
+	st.sessions[rec.ID] = rec
+	st.waits[rec.ID] = domain.CapacityWait{
+		SessionID: rec.ID, SourceGeneration: "generation-1", AgentSessionID: "thread-1",
+		WorkspacePath: "/wt/s-capacity", Branch: "task/1602", ProfileHash: profile.Hash,
+		State: domain.CapacityWaitScheduled,
+	}
+
+	if err := m.Reconcile(ctx); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if st.sessions[rec.ID].IsTerminated || lcm.terminated[rec.ID] != 0 {
+		t.Fatalf("capacity-wait session was terminated: record=%+v calls=%d", st.sessions[rec.ID], lcm.terminated[rec.ID])
+	}
+	if ws.stashCalls != 0 || len(ws.calls) != 0 || rt.destroyed != 0 || rt.created != 0 {
+		t.Fatalf("capacity wait must have zero worktree/runtime side effects: stash=%d workspace=%v destroy=%d create=%d", ws.stashCalls, ws.calls, rt.destroyed, rt.created)
 	}
 }
 

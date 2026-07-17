@@ -658,6 +658,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/sessions/preflight": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Validate transactional spawn prerequisites without side effects */
+        post: operations["preflightSpawnSession"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -730,6 +747,11 @@ export interface components {
         ControllersSessionView: {
             activity: components["schemas"]["DomainActivity"];
             branch?: string;
+            capacityAttemptCount?: number;
+            /** Format: date-time */
+            capacityNextProbeAt?: null | string;
+            capacityWaitReason?: string;
+            capacityWaitState?: string;
             /** Format: date-time */
             createdAt: string;
             displayName?: string;
@@ -747,7 +769,7 @@ export interface components {
             projectId: string;
             prs: components["schemas"]["SessionPRFacts"][];
             /** @enum {string} */
-            status: "working" | "pr_open" | "draft" | "ci_failed" | "review_pending" | "changes_requested" | "approved" | "mergeable" | "merged" | "needs_input" | "idle" | "terminated" | "no_signal";
+            status: "working" | "pr_open" | "draft" | "ci_failed" | "review_pending" | "changes_requested" | "approved" | "mergeable" | "merged" | "needs_input" | "capacity_wait" | "idle" | "terminated" | "no_signal";
             terminalHandleId?: string;
             /** Format: date-time */
             updatedAt: string;
@@ -786,6 +808,26 @@ export interface components {
         };
         DomainReviewerConfig: {
             harness: string;
+        };
+        DomainSpawnOutcome: {
+            generation?: string;
+            phase: string;
+            profileHash?: string;
+            rollbackState?: string;
+            rolledBack: boolean;
+            sessionId?: string;
+            state: string;
+            worktree?: string;
+        };
+        DomainSpawnPreflight: {
+            agentBinaryPath?: string;
+            capabilityClass: string;
+            launcherPath?: string;
+            ok: boolean;
+            phase: string;
+            profileHash: string;
+            runtime: string;
+            state: string;
         };
         ImportReport: {
             dryRun: boolean;
@@ -874,7 +916,7 @@ export interface components {
             target: components["schemas"]["NotificationTarget"];
             title: string;
             /** @enum {string} */
-            type: "needs_input" | "ready_to_merge" | "pr_merged" | "pr_closed_unmerged";
+            type: "needs_input" | "ready_to_merge" | "pr_merged" | "pr_closed_unmerged" | "capacity_wait";
         };
         NotificationTarget: {
             /** @enum {string} */
@@ -1135,6 +1177,9 @@ export interface components {
         SpawnOrchestratorResponse: {
             orchestrator: components["schemas"]["OrchestratorResponse"];
         };
+        SpawnPreflightResponse: {
+            preflight: components["schemas"]["DomainSpawnPreflight"];
+        };
         SpawnSessionRequest: {
             branch?: string;
             displayName?: string;
@@ -1145,6 +1190,11 @@ export interface components {
             kind?: "worker" | "orchestrator";
             projectId: string;
             prompt?: string;
+            requestId?: string;
+        };
+        SpawnSessionResponse: {
+            outcome: components["schemas"]["DomainSpawnOutcome"];
+            session: components["schemas"]["ControllersSessionView"];
         };
         SubmitReviewInput: {
             /** @description Review body recorded by AO. Required for changes_requested. */
@@ -2381,7 +2431,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SessionResponse"];
+                    "application/json": components["schemas"]["SpawnSessionResponse"];
                 };
             };
             /** @description Bad Request */
@@ -3445,6 +3495,57 @@ export interface operations {
             };
             /** @description Not Implemented */
             501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    preflightSpawnSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SpawnSessionRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SpawnPreflightResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
                 headers: {
                     [name: string]: unknown;
                 };

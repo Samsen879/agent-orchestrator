@@ -12,6 +12,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/reviewer"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/runtime/runtimeselect"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/workspace/gitworktree"
+	"github.com/aoagents/agent-orchestrator/backend/internal/capacity"
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/lifecycle"
@@ -34,10 +35,12 @@ type lifecycleStack struct {
 	// LCM is the Lifecycle Manager (the canonical write path). It is exposed so
 	// startSession can share the same reducer the reaper drives, rather than
 	// standing up a second store+LCM pair that would diverge under writes.
-	LCM         *lifecycle.Manager
-	reaperDone  <-chan struct{}
-	scmDone     <-chan struct{}
-	trackerDone <-chan struct{}
+	LCM          *lifecycle.Manager
+	reaperDone   <-chan struct{}
+	capacityDone <-chan struct{}
+	reaper       *reaper.Reaper
+	scmDone      <-chan struct{}
+	trackerDone  <-chan struct{}
 }
 
 // startLifecycle constructs the Lifecycle Manager over the store and starts the
@@ -47,13 +50,16 @@ type lifecycleStack struct {
 func startLifecycle(ctx context.Context, store *sqlite.Store, runtime ports.Runtime, messenger ports.AgentMessenger, notifier notificationSink, telemetry ports.EventSink, logger *slog.Logger) *lifecycleStack {
 	lcm := lifecycle.New(store, messenger, lifecycle.WithNotificationSink(notifier), lifecycle.WithTelemetry(telemetry))
 	rp := reaper.New(lcm, store, runtime, reaper.Config{Logger: logger})
-	return &lifecycleStack{LCM: lcm, reaperDone: rp.Start(ctx)}
+	return &lifecycleStack{LCM: lcm, reaper: rp, reaperDone: rp.Start(ctx)}
 }
 
 // Stop waits for the reaper goroutine to exit. The caller must cancel the ctx
 // passed to startLifecycle before calling Stop.
 func (l *lifecycleStack) Stop() {
 	<-l.reaperDone
+	if l.capacityDone != nil {
+		<-l.capacityDone
+	}
 	if l.scmDone != nil {
 		<-l.scmDone
 	}
@@ -73,6 +79,14 @@ func (l *lifecycleStack) Stop() {
 type sessionLifecycle interface {
 	Reconcile(ctx context.Context) error
 	RestoreAll(ctx context.Context) error
+	ResumeCapacity(ctx context.Context, wait domain.CapacityWait) error
+}
+
+func (l *lifecycleStack) startCapacity(ctx context.Context, store *sqlite.Store, sessions sessionLifecycle, notifier notificationSink, logger *slog.Logger) {
+	manager := capacity.New(store, l.LCM, sessions, notifier, capacity.Config{Logger: logger})
+	l.reaper.SetCapacitySink(manager)
+	l.LCM.SetCapacityActivitySink(manager)
+	l.capacityDone = manager.Start(ctx)
 }
 
 // startSession builds the controller-facing session service: a session manager

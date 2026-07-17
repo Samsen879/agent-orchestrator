@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
@@ -32,12 +33,30 @@ func (s fakeSessions) ListAllSessions(context.Context) ([]domain.SessionRecord, 
 }
 
 type fakeRuntime struct {
-	alive bool
-	err   error
+	alive  bool
+	err    error
+	output string
 }
 
 func (r fakeRuntime) IsAlive(context.Context, ports.RuntimeHandle) (bool, error) {
 	return r.alive, r.err
+}
+
+func (r fakeRuntime) GetOutput(context.Context, ports.RuntimeHandle, int) (string, error) {
+	return r.output, nil
+}
+
+type fakeCapacitySink struct {
+	calls  int
+	source domain.SessionRecord
+	output string
+}
+
+func (s *fakeCapacitySink) ObserveOutput(_ context.Context, source domain.SessionRecord, output string, _ time.Time) error {
+	s.calls++
+	s.source = source
+	s.output = output
+	return nil
 }
 
 func probableSession(id domain.SessionID) domain.SessionRecord {
@@ -45,6 +64,23 @@ func probableSession(id domain.SessionID) domain.SessionRecord {
 		ID:       id,
 		Activity: domain.Activity{State: domain.ActivityActive},
 		Metadata: domain.SessionMetadata{RuntimeHandleID: "h1"},
+	}
+}
+
+func TestTickForwardsCodexOutputWithSourceIdentity(t *testing.T) {
+	lcm := &fakeLCM{}
+	session := probableSession("mer-1")
+	session.Kind = domain.KindWorker
+	session.Harness = domain.HarnessCodex
+	session.Metadata.Generation = "generation-1"
+	sink := &fakeCapacitySink{}
+	r := New(lcm, fakeSessions{rows: []domain.SessionRecord{session}}, fakeRuntime{alive: true, output: "429 Too Many Requests"}, Config{Logger: quietLogger()})
+	r.SetCapacitySink(sink)
+	if err := r.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if sink.calls != 1 || sink.source.Metadata.Generation != "generation-1" || sink.output != "429 Too Many Requests" {
+		t.Fatalf("capacity sink = %+v", sink)
 	}
 }
 

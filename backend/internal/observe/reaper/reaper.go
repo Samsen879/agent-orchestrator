@@ -9,6 +9,7 @@ package reaper
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -45,6 +46,11 @@ type runtimeObservationSink interface {
 
 type runtimeProber interface {
 	IsAlive(context.Context, ports.RuntimeHandle) (bool, error)
+	GetOutput(context.Context, ports.RuntimeHandle, int) (string, error)
+}
+
+type capacityOutputSink interface {
+	ObserveOutput(context.Context, domain.SessionRecord, string, time.Time) error
 }
 
 // Reaper is the polling timer. Construct it with New; start the background
@@ -56,6 +62,16 @@ type Reaper struct {
 	tick     time.Duration
 	clock    func() time.Time
 	logger   *slog.Logger
+	mu       sync.RWMutex
+	capacity capacityOutputSink
+}
+
+// SetCapacitySink wires the durable capacity observer after session-manager
+// construction breaks the daemon's lifecycle/resumer dependency cycle.
+func (r *Reaper) SetCapacitySink(sink capacityOutputSink) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.capacity = sink
 }
 
 // New constructs a Reaper. sink is the lifecycle fact destination; sessions
@@ -146,6 +162,18 @@ func (r *Reaper) probeOne(ctx context.Context, sess domain.SessionRecord, now ti
 		r.logger.Warn("reaper: session has no runtime handle metadata, skipping",
 			"session", sess.ID)
 		return
+	}
+	if sess.Kind == domain.KindWorker && sess.Harness == domain.HarnessCodex {
+		r.mu.RLock()
+		sink := r.capacity
+		r.mu.RUnlock()
+		if sink != nil {
+			if output, outputErr := r.runtime.GetOutput(ctx, handle, 80); outputErr == nil && output != "" {
+				if err := sink.ObserveOutput(ctx, sess, output, now); err != nil {
+					r.logger.Error("reaper: capacity observation failed", "session", sess.ID, "err", err)
+				}
+			}
+		}
 	}
 	alive, probeErr := r.runtime.IsAlive(ctx, handle)
 	facts := ports.RuntimeFacts{ObservedAt: now}

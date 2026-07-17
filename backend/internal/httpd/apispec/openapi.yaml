@@ -1965,6 +1965,17 @@ components:
           $ref: '#/components/schemas/DomainActivity'
         branch:
           type: string
+        capacityAttemptCount:
+          type: integer
+        capacityNextProbeAt:
+          format: date-time
+          type:
+          - "null"
+          - string
+        capacityWaitReason:
+          type: string
+        capacityWaitState:
+          type: string
         createdAt:
           format: date-time
           type: string
@@ -2009,6 +2020,7 @@ components:
           - mergeable
           - merged
           - needs_input
+          - capacity_wait
           - idle
           - terminated
           - no_signal
@@ -2394,6 +2406,7 @@ components:
           - ready_to_merge
           - pr_merged
           - pr_closed_unmerged
+          - capacity_wait
           type: string
       required:
       - id

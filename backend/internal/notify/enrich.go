@@ -3,6 +3,7 @@ package notify
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
@@ -19,7 +20,7 @@ func enrich(intent Intent) (domain.NotificationRecord, error) {
 	if !intent.Type.Valid() {
 		return domain.NotificationRecord{}, domain.ErrInvalidNotificationType
 	}
-	if intent.Type != domain.NotificationNeedsInput && rec.PRURL == "" {
+	if intent.Type != domain.NotificationNeedsInput && intent.Type != domain.NotificationCapacityWait && rec.PRURL == "" {
 		return domain.NotificationRecord{}, domain.ErrInvalidNotificationRecord
 	}
 	rec.Title = titleForIntent(intent)
@@ -40,6 +41,8 @@ func titleForIntent(intent Intent) string {
 		return fmt.Sprintf("%s was merged", prLabel(intent))
 	case domain.NotificationPRClosedUnmerged:
 		return fmt.Sprintf("%s was closed without merging", prLabel(intent))
+	case domain.NotificationCapacityWait:
+		return fmt.Sprintf("%s is waiting for provider capacity", sessionLabel(intent))
 	default:
 		return "Notification"
 	}
@@ -64,6 +67,11 @@ func bodyForIntent(intent Intent) string {
 			return fmt.Sprintf("%s was closed without merging.", title)
 		}
 		return "The pull request was closed without merging."
+	case domain.NotificationCapacityWait:
+		if !intent.NextProbeAt.IsZero() {
+			return fmt.Sprintf("AO will retry the same session at %s. %s", intent.NextProbeAt.UTC().Format(time.RFC3339), strings.TrimSpace(intent.WaitReason))
+		}
+		return "AO will retry the same session when provider capacity is available."
 	default:
 		return ""
 	}

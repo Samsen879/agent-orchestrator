@@ -54,6 +54,10 @@ type sessionDTO struct {
 	ExecutionProfile             executionProfileDTO `json:"executionProfile"`
 	ObservedExecutionProfileHash string              `json:"observedExecutionProfileHash,omitempty"`
 	ExecutionProfileDrift        bool                `json:"executionProfileDrift"`
+	CapacityWaitState            string              `json:"capacityWaitState,omitempty"`
+	CapacityWaitReason           string              `json:"capacityWaitReason,omitempty"`
+	CapacityNextProbeAt          *time.Time          `json:"capacityNextProbeAt,omitempty"`
+	CapacityAttemptCount         int                 `json:"capacityAttemptCount,omitempty"`
 }
 
 type executionProfileDTO struct {

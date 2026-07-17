@@ -64,6 +64,10 @@ async function fetchWorkspaces(): Promise<WorkspaceSummary[]> {
 				activity: toSessionActivity(session.activity),
 				previewUrl: session.previewUrl,
 				previewRevision: session.previewRevision,
+				capacityWaitState: session.capacityWaitState,
+				capacityWaitReason: session.capacityWaitReason,
+				capacityNextProbeAt: session.capacityNextProbeAt ?? undefined,
+				capacityAttemptCount: session.capacityAttemptCount,
 				prs: (session.prs ?? []).map(toPullRequestFacts),
 			})),
 	}));
