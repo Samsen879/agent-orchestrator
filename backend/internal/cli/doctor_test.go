@@ -177,6 +177,27 @@ func TestDoctorWarnsWhenHarnessVersionFails(t *testing.T) {
 	}
 }
 
+func TestDoctorReportsHumanGateAgeTaskAndDependencyImpact(t *testing.T) {
+	cfg := setConfigEnv(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/sessions" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"sessions":[{"id":"lane-a","humanGateId":"gate-1","humanGateRequiredDecision":"Choose A or B","humanGateAffectedTaskId":"task-a","humanGateAgeSeconds":90,"humanGateDependencyImpact":2}]}`)
+	}))
+	t.Cleanup(srv.Close)
+	writeRunFileFor(t, cfg, srv)
+	c := &commandContext{deps: Deps{ProcessAlive: func(int) bool { return true }}.withDefaults()}
+
+	check := c.checkHumanGates(context.Background())
+	if check.Level != doctorWarn || !strings.Contains(check.Message, "gate=gate-1") || !strings.Contains(check.Message, "age=90s") ||
+		!strings.Contains(check.Message, "task=task-a") || !strings.Contains(check.Message, "dependents=2") || !strings.Contains(check.Message, "Choose A or B") {
+		t.Fatalf("human gate check = %+v", check)
+	}
+}
+
 func TestDoctorChecksGitHubTokenFromEnv(t *testing.T) {
 	setConfigEnv(t)
 	srv := githubDoctorServer(t, http.StatusOK, `{"login":"octocat"}`, "repo, read:org")

@@ -61,6 +61,7 @@ describe("toSessionStatus", () => {
 	it("passes through a known status", () => {
 		expect(toSessionStatus("mergeable")).toBe("mergeable");
 		expect(toSessionStatus("no_signal")).toBe("no_signal");
+		expect(toSessionStatus("human_gate")).toBe("human_gate");
 	});
 
 	it("keeps a backend merged status even when the session is terminated", () => {
@@ -102,6 +103,7 @@ describe("workerDisplayStatus", () => {
 
 	it.each([
 		["needs_input", "needs_you"],
+		["human_gate", "needs_you"],
 		["changes_requested", "needs_you"],
 		["review_pending", "needs_you"],
 		["ci_failed", "ci_failed"],
@@ -336,6 +338,7 @@ describe("attentionZone", () => {
 		["mergeable", "merge"],
 		["approved", "merge"],
 		["needs_input", "action"],
+		["human_gate", "action"],
 		["no_signal", "action"],
 		["ci_failed", "action"],
 		["changes_requested", "action"],

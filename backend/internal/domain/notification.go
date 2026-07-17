@@ -19,12 +19,14 @@ const (
 	NotificationPRClosedUnmerged NotificationType = "pr_closed_unmerged"
 	// NotificationCapacityWait means a worker is waiting for provider capacity.
 	NotificationCapacityWait NotificationType = "capacity_wait"
+	// NotificationHumanGate means a lane needs a protected human decision.
+	NotificationHumanGate NotificationType = "human_gate"
 )
 
 // Valid reports whether t is one of the v1 notification kinds.
 func (t NotificationType) Valid() bool {
 	switch t {
-	case NotificationNeedsInput, NotificationReadyToMerge, NotificationPRMerged, NotificationPRClosedUnmerged, NotificationCapacityWait:
+	case NotificationNeedsInput, NotificationReadyToMerge, NotificationPRMerged, NotificationPRClosedUnmerged, NotificationCapacityWait, NotificationHumanGate:
 		return true
 	default:
 		return false

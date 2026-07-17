@@ -1117,6 +1117,52 @@ paths:
       summary: Apply an explicit human-authorized execution profile change
       tags:
       - sessions
+  /api/v1/sessions/{sessionId}/gates:
+    post:
+      operationId: detectSessionGate
+      parameters:
+      - description: Session identifier, e.g. project-1.
+        in: path
+        name: sessionId
+        required: true
+        schema:
+          description: Session identifier, e.g. project-1.
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DetectBlockRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DetectBlockResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+      summary: Deterministically classify a blocked lane and persist protected human
+        gates
+      tags:
+      - sessions
   /api/v1/sessions/{sessionId}/kill:
     post:
       operationId: killSession
@@ -1987,6 +2033,28 @@ components:
           type: boolean
         harness:
           type: string
+        humanGateAffectedTaskId:
+          type: string
+        humanGateAgeSeconds:
+          format: int64
+          type: integer
+        humanGateAllowedActions:
+          items:
+            type: string
+          type: array
+        humanGateDependencyImpact:
+          type: integer
+        humanGateDetectedAt:
+          format: date-time
+          type:
+          - "null"
+          - string
+        humanGateId:
+          type: string
+        humanGateReason:
+          type: string
+        humanGateRequiredDecision:
+          type: string
         id:
           type: string
         isTerminated:
@@ -2021,6 +2089,7 @@ components:
           - merged
           - needs_input
           - capacity_wait
+          - human_gate
           - idle
           - terminated
           - no_signal
@@ -2061,6 +2130,61 @@ components:
       - kind
       - path
       - resolveError
+      type: object
+    DetectBlockRequest:
+      properties:
+        affectedTaskId:
+          type: string
+        allowedActions:
+          items:
+            type: string
+          type: array
+        dedupeKey:
+          type: string
+        dependencyEdges:
+          items:
+            $ref: '#/components/schemas/GateDependencyEdge'
+          type: array
+        detectedAt:
+          format: date-time
+          type: string
+        escalationAt:
+          format: date-time
+          type: string
+        evidence:
+          items:
+            $ref: '#/components/schemas/GateEvidence'
+          type: array
+        profileHash:
+          type: string
+        projectId:
+          type: string
+        reason:
+          type: string
+        reminderIntervalSeconds:
+          format: int64
+          type: integer
+        requiredDecision:
+          type: string
+        sourceGeneration:
+          type: string
+      required:
+      - projectId
+      - sourceGeneration
+      - reason
+      type: object
+    DetectBlockResponse:
+      properties:
+        category:
+          type: string
+        gateId:
+          type: string
+        gateState:
+          type: string
+        profileHash:
+          type: string
+      required:
+      - category
       type: object
     DomainActivity:
       properties:
@@ -2181,6 +2305,29 @@ components:
       - runtime
       - capabilityClass
       - profileHash
+      type: object
+    GateDependencyEdge:
+      properties:
+        fromTaskId:
+          type: string
+        toTaskId:
+          type: string
+      required:
+      - fromTaskId
+      - toTaskId
+      type: object
+    GateEvidence:
+      properties:
+        detail:
+          type: string
+        kind:
+          type: string
+        source:
+          type: string
+      required:
+      - kind
+      - source
+      - detail
       type: object
     ImportReport:
       properties:
@@ -2407,6 +2554,7 @@ components:
           - pr_merged
           - pr_closed_unmerged
           - capacity_wait
+          - human_gate
           type: string
       required:
       - id

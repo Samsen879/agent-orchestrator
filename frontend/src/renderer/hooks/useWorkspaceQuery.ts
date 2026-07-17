@@ -68,6 +68,13 @@ async function fetchWorkspaces(): Promise<WorkspaceSummary[]> {
 				capacityWaitReason: session.capacityWaitReason,
 				capacityNextProbeAt: session.capacityNextProbeAt ?? undefined,
 				capacityAttemptCount: session.capacityAttemptCount,
+				humanGateId: session.humanGateId,
+				humanGateReason: session.humanGateReason,
+				humanGateRequiredDecision: session.humanGateRequiredDecision,
+				humanGateAffectedTaskId: session.humanGateAffectedTaskId,
+				humanGateDetectedAt: session.humanGateDetectedAt ?? undefined,
+				humanGateAgeSeconds: session.humanGateAgeSeconds,
+				humanGateDependencyImpact: session.humanGateDependencyImpact,
 				prs: (session.prs ?? []).map(toPullRequestFacts),
 			})),
 	}));

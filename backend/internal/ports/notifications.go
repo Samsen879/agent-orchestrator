@@ -26,4 +26,6 @@ type NotificationIntent struct {
 	Repo               string
 	WaitReason         string
 	NextProbeAt        time.Time
+	RequiredDecision   string
+	AffectedTaskID     string
 }

@@ -17,6 +17,7 @@ const (
 	StatusMerged           SessionStatus = "merged"
 	StatusNeedsInput       SessionStatus = "needs_input"
 	StatusCapacityWait     SessionStatus = "capacity_wait"
+	StatusHumanGate        SessionStatus = "human_gate"
 	StatusIdle             SessionStatus = "idle"
 	StatusTerminated       SessionStatus = "terminated"
 	// StatusNoSignal marks a live session whose agent has never delivered a

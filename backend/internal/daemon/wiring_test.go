@@ -494,6 +494,10 @@ func (f *fakeSessionLifecycle) ResumeCapacity(_ context.Context, _ domain.Capaci
 	return nil
 }
 
+func (f *fakeSessionLifecycle) ResumeHumanGate(_ context.Context, _ domain.HumanGate, _ string) error {
+	return nil
+}
+
 // TestWiring_SessionLifecycleInterfaceInvokedByDaemon asserts the
 // sessionLifecycle interface is satisfied by *sessionmanager.Manager (compile
 // check) and that Reconcile and RestoreAll dispatch correctly through the

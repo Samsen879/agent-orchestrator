@@ -136,6 +136,8 @@ var schemaNames = map[string]string{
 	"DomainTrackerIntakeConfig": "TrackerIntakeConfig",
 	"DomainAgentConfig":         "AgentConfig",
 	"DomainRoleOverride":        "RoleOverride",
+	"DomainGateEvidence":        "GateEvidence",
+	"DomainGateDependencyEdge":  "GateDependencyEdge",
 	// httpd/controllers (wire envelopes)
 	"ControllersListProjectsResponse":             "ListProjectsResponse",
 	"ControllersProjectResponse":                  "ProjectResponse",
@@ -149,6 +151,8 @@ var schemaNames = map[string]string{
 	"ControllersSpawnSessionResponse":             "SpawnSessionResponse",
 	"ControllersSpawnPreflightResponse":           "SpawnPreflightResponse",
 	"ControllersSessionResponse":                  "SessionResponse",
+	"ControllersDetectBlockRequest":               "DetectBlockRequest",
+	"ControllersDetectBlockResponse":              "DetectBlockResponse",
 	"ControllersSessionPreviewResponse":           "SessionPreviewResponse",
 	"ControllersSetSessionPreviewRequest":         "SetSessionPreviewRequest",
 	"ControllersRenameSessionRequest":             "RenameSessionRequest",
@@ -659,6 +663,12 @@ func sessionOperations() []operation {
 				{http.StatusNotFound, envelope.APIError{}},
 				{http.StatusInternalServerError, envelope.APIError{}},
 			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/sessions/{sessionId}/gates", id: "detectSessionGate", tag: "sessions",
+			summary:    "Deterministically classify a blocked lane and persist protected human gates",
+			pathParams: []any{controllers.SessionIDParam{}}, reqBody: controllers.DetectBlockRequest{},
+			resps: []respUnit{{http.StatusOK, controllers.DetectBlockResponse{}}, {http.StatusBadRequest, envelope.APIError{}}, {http.StatusConflict, envelope.APIError{}}, {http.StatusInternalServerError, envelope.APIError{}}},
 		},
 		{
 			method: http.MethodGet, path: "/api/v1/sessions/{sessionId}/preview", id: "getSessionPreview", tag: "sessions",

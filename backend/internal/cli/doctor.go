@@ -166,7 +166,7 @@ func (c *commandContext) runDoctor(ctx context.Context) []doctorCheck {
 		}
 		checks = append(checks, doctorCheck{Level: level, Section: doctorSectionCore, Name: "daemon", Message: msg})
 		if st.State == stateReady {
-			checks = append(checks, c.checkExecutionProfiles(ctx), c.checkCapacityWaits(ctx))
+			checks = append(checks, c.checkExecutionProfiles(ctx), c.checkCapacityWaits(ctx), c.checkHumanGates(ctx))
 		}
 	}
 
@@ -181,6 +181,25 @@ func (c *commandContext) runDoctor(ctx context.Context) []doctorCheck {
 	}
 	checks = append(checks, c.checkCodexLaunchFlags(ctx), c.checkGitHubToken(ctx))
 	return checks
+}
+
+func (c *commandContext) checkHumanGates(ctx context.Context) doctorCheck {
+	var response sessionListResponse
+	if err := c.getJSON(ctx, "sessions", &response); err != nil {
+		return doctorCheck{Level: doctorWarn, Section: doctorSectionCore, Name: "human-gates", Message: err.Error()}
+	}
+	var gates []string
+	for _, session := range response.Sessions {
+		if session.HumanGateID == "" {
+			continue
+		}
+		gates = append(gates, fmt.Sprintf("%s gate=%s age=%ds task=%s dependents=%d decision=%s", session.ID, session.HumanGateID, session.HumanGateAgeSeconds,
+			session.HumanGateAffectedTaskID, session.HumanGateDependencyImpact, session.HumanGateRequiredDecision))
+	}
+	if len(gates) == 0 {
+		return doctorCheck{Level: doctorPass, Section: doctorSectionCore, Name: "human-gates", Message: "no open protected human gates"}
+	}
+	return doctorCheck{Level: doctorWarn, Section: doctorSectionCore, Name: "human-gates", Message: strings.Join(gates, "; ")}
 }
 
 func (c *commandContext) checkCapacityWaits(ctx context.Context) doctorCheck {
