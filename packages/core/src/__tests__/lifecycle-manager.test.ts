@@ -179,7 +179,10 @@ describe("start / stop", () => {
 
 describe("check (single session)", () => {
   it("detects transition from spawning to working", async () => {
-    const session = makeSession({ status: "spawning" });
+    const session = makeSession({
+      status: "spawning",
+      metadata: { runtimeHandle: JSON.stringify({ id: "rt-1", runtimeName: "mock", data: {} }) },
+    });
     vi.mocked(mockSessionManager.get).mockResolvedValue(session);
 
     // Write metadata so updateMetadata works
@@ -203,6 +206,35 @@ describe("check (single session)", () => {
     // Metadata should be updated
     const meta = readMetadataRaw(sessionsDir, "app-1");
     expect(meta!["status"]).toBe("working");
+  });
+
+  it("keeps a durable workspace-creation record in spawning until runtime metadata exists", async () => {
+    const session = makeSession({
+      status: "spawning",
+      runtimeHandle: null,
+      activity: null,
+      metadata: {},
+    });
+    vi.mocked(mockSessionManager.get).mockResolvedValue(session);
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "",
+      branch: "feat/test",
+      status: "spawning",
+      project: "my-app",
+      createdAt: new Date().toISOString(),
+    });
+
+    const lm = createLifecycleManager({
+      config,
+      registry: mockRegistry,
+      sessionManager: mockSessionManager,
+    });
+
+    await lm.check("app-1");
+
+    expect(lm.getStates().get("app-1")).toBe("spawning");
+    expect(mockAgent.getActivityState).not.toHaveBeenCalled();
   });
 
   it("uses worker-specific agent fallback when metadata does not persist an agent", async () => {
@@ -446,6 +478,52 @@ describe("check (single session)", () => {
     expect(lm.getStates().get("app-1")).toBe("idle");
   });
 
+  it("does not mark Codex stuck when stale JSONL activity is contradicted by an active terminal", async () => {
+    config.reactions = {
+      "agent-stuck": {
+        auto: true,
+        action: "notify",
+        threshold: "1m",
+      },
+    };
+
+    vi.mocked(mockAgent.getActivityState).mockResolvedValue({
+      state: "idle",
+      timestamp: new Date(Date.now() - 120_000),
+    });
+    vi.mocked(mockRuntime.getOutput).mockResolvedValue("Running a long tool command...\n");
+    vi.mocked(mockAgent.detectActivity).mockReturnValue("active");
+
+    const session = makeSession({
+      status: "working",
+      metadata: {
+        agent: "codex",
+        runtimeHandle: JSON.stringify({ id: "rt-1", runtimeName: "mock", data: {} }),
+      },
+    });
+    vi.mocked(mockSessionManager.get).mockResolvedValue(session);
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "main",
+      status: "working",
+      project: "my-app",
+      agent: "codex",
+      runtimeHandle: JSON.stringify({ id: "rt-1", runtimeName: "mock", data: {} }),
+    });
+
+    const lm = createLifecycleManager({
+      config,
+      registry: mockRegistry,
+      sessionManager: mockSessionManager,
+    });
+
+    await lm.check("app-1");
+    await lm.check("app-1");
+
+    expect(lm.getStates().get("app-1")).toBe("working");
+  });
+
   it("returns idle sessions to working when the agent becomes active again", async () => {
     vi.mocked(mockAgent.getActivityState).mockResolvedValue({
       state: "active",
@@ -504,6 +582,7 @@ describe("check (single session)", () => {
       sessionManager: mockSessionManager,
     });
 
+    await lm.check("app-1");
     await lm.check("app-1");
 
     expect(lm.getStates().get("app-1")).toBe("stuck");
@@ -590,6 +669,7 @@ describe("check (single session)", () => {
       sessionManager: mockSessionManager,
     });
 
+    await lm.check("app-1");
     await lm.check("app-1");
 
     expect(lm.getStates().get("app-1")).toBe("stuck");
@@ -735,8 +815,9 @@ describe("check (single session)", () => {
     });
 
     await lm.check("app-1");
+    await lm.check("app-1");
 
-    expect(mockSCM.detectPR).toHaveBeenCalledOnce();
+    expect(mockSCM.detectPR).toHaveBeenCalled();
     const meta = readMetadataRaw(sessionsDir, "app-1");
     expect(meta?.["pr"]).toBe(makePR().url);
     expect(lm.getStates().get("app-1")).toBe("stuck");
@@ -1285,11 +1366,9 @@ describe("reactions", () => {
 
     await lm.check("app-1");
 
-    expect(mockSessionManager.send).toHaveBeenCalledWith(
-      "app-1",
-      "CI is failing. Fix it.",
-      { requireConfirmation: true },
-    );
+    expect(mockSessionManager.send).toHaveBeenCalledWith("app-1", "CI is failing. Fix it.", {
+      requireConfirmation: true,
+    });
   });
 
   it("does not trigger reaction when auto=false", async () => {
@@ -1426,7 +1505,8 @@ describe("reactions", () => {
       "agent-idle": {
         auto: true,
         action: "send-to-agent",
-        message: "Continue coordinating the unfinished execution chain without waiting for human input.",
+        message:
+          "Continue coordinating the unfinished execution chain without waiting for human input.",
       },
     };
 
@@ -1680,6 +1760,7 @@ describe("reactions", () => {
       sessionManager: mockSessionManager,
     });
 
+    await lm.check("app-1");
     await lm.check("app-1");
 
     expect(mockSessionManager.send).toHaveBeenCalledWith(
@@ -2000,11 +2081,9 @@ describe("reactions", () => {
     await lm.check("app-1");
 
     expect(mockSessionManager.send).toHaveBeenCalledTimes(1);
-    expect(mockSessionManager.send).toHaveBeenCalledWith(
-      "app-1",
-      "Handle requested changes.",
-      { requireConfirmation: true },
-    );
+    expect(mockSessionManager.send).toHaveBeenCalledWith("app-1", "Handle requested changes.", {
+      requireConfirmation: true,
+    });
   });
 
   it("dispatches automated review comments only once for an unchanged backlog", async () => {
@@ -2231,7 +2310,10 @@ describe("reactions", () => {
 
 describe("getStates", () => {
   it("returns copy of states map", async () => {
-    const session = makeSession({ status: "spawning" });
+    const session = makeSession({
+      status: "spawning",
+      metadata: { runtimeHandle: JSON.stringify({ id: "rt-1", runtimeName: "mock", data: {} }) },
+    });
     vi.mocked(mockSessionManager.get).mockResolvedValue(session);
 
     writeMetadata(sessionsDir, "app-1", {

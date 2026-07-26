@@ -278,7 +278,9 @@ async function getTmuxForegroundCommand(sessionName: string): Promise<string | n
   }
 }
 
-async function getWorkspaceGitBranch(workspacePath: string | null | undefined): Promise<string | null> {
+async function getWorkspaceGitBranch(
+  workspacePath: string | null | undefined,
+): Promise<string | null> {
   if (!workspacePath) return null;
 
   try {
@@ -1046,6 +1048,26 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
       branch = `session/${sessionId}`;
     }
 
+    const createdAt = new Date().toISOString();
+    try {
+      writeMetadata(sessionsDir, sessionId, {
+        worktree: "",
+        branch,
+        status: "spawning",
+        issue: spawnConfig.issueId,
+        project: spawnConfig.projectId,
+        agent: selection.agentName,
+        createdAt,
+      });
+    } catch (err) {
+      try {
+        deleteMetadata(sessionsDir, sessionId, false);
+      } catch {
+        /* best effort */
+      }
+      throw err;
+    }
+
     // Create workspace (if workspace plugin is available)
     let workspacePath = project.path;
     if (plugins.workspace) {
@@ -1057,6 +1079,7 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
           branch,
         });
         workspacePath = wsInfo.path;
+        updateMetadata(sessionsDir, sessionId, { worktree: workspacePath });
 
         // Run post-create hooks — clean up workspace on failure
         if (plugins.workspace.postCreate) {
@@ -1149,7 +1172,8 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
           AO_CALLER_TYPE: "agent",
           AO_PROJECT_ID: spawnConfig.projectId,
           AO_CONFIG_PATH: config.configPath,
-          ...(config.port !== undefined && config.port !== null && { AO_PORT: String(config.port) }),
+          ...(config.port !== undefined &&
+            config.port !== null && { AO_PORT: String(config.port) }),
         },
       });
     } catch (err) {
@@ -1200,7 +1224,7 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
         issue: spawnConfig.issueId,
         project: spawnConfig.projectId,
         agent: selection.agentName, // Persist agent name for lifecycle manager
-        createdAt: new Date().toISOString(),
+        createdAt,
         runtimeHandle: JSON.stringify(handle),
         opencodeSessionId: reusedOpenCodeSessionId,
       });
@@ -1875,11 +1899,7 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
     return result;
   }
 
-  async function send(
-    sessionId: SessionId,
-    message: string,
-    options?: SendOptions,
-  ): Promise<void> {
+  async function send(sessionId: SessionId, message: string, options?: SendOptions): Promise<void> {
     const { raw, sessionsDir, project } = requireSessionRecord(sessionId);
     const pause = getProjectPause(project);
     const orchestratorId = `${project.sessionPrefix}-orchestrator`;

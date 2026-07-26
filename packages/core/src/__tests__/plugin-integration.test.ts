@@ -20,6 +20,7 @@ import { randomUUID } from "node:crypto";
 // ---------------------------------------------------------------------------
 
 const { ghMock } = vi.hoisted(() => ({ ghMock: vi.fn() }));
+const ghResults: unknown[] = [];
 
 vi.mock("node:child_process", () => {
   const execFile = Object.assign(vi.fn(), {
@@ -69,7 +70,7 @@ function makeHandle(id: string): RuntimeHandle {
 }
 
 function mockGh(result: unknown): void {
-  ghMock.mockResolvedValueOnce({ stdout: JSON.stringify(result) });
+  ghResults.push(result);
 }
 
 const pr: PRInfo = {
@@ -108,6 +109,13 @@ function makeSession(overrides: Partial<Session> = {}): Session {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  ghResults.length = 0;
+  ghMock.mockImplementation(async (command: string) => {
+    if (command === "git") {
+      return { stdout: "" };
+    }
+    return { stdout: JSON.stringify(ghResults.shift()) };
+  });
 
   tmpDir = join(tmpdir(), `ao-test-plugin-int-${randomUUID()}`);
   mkdirSync(tmpDir, { recursive: true });

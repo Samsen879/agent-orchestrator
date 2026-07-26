@@ -1,6 +1,14 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { existsSync, lstatSync, symlinkSync, rmSync, mkdirSync, readdirSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  symlinkSync,
+  rmSync,
+  mkdirSync,
+  readdirSync,
+  statSync,
+} from "node:fs";
 import { join, resolve, basename, dirname } from "node:path";
 import { homedir } from "node:os";
 import type {
@@ -11,8 +19,9 @@ import type {
   ProjectConfig,
 } from "@composio/ao-core";
 
-/** Timeout for git commands (30 seconds) */
-const GIT_TIMEOUT = 30_000;
+/** Bound git operations without killing legitimate large checkouts too aggressively. */
+const GIT_TIMEOUT = 5 * 60_000;
+const DEFAULT_INITIALIZATION_STALE_MS = 15 * 60_000;
 
 const execFileAsync = promisify(execFile);
 
@@ -25,8 +34,128 @@ export const manifest = {
 
 /** Run a git command in a given directory */
 async function git(cwd: string, ...args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync("git", args, { cwd });
+  const { stdout } = await execFileAsync("git", args, { cwd, timeout: GIT_TIMEOUT });
   return stdout.trimEnd();
+}
+
+async function cleanupFailedWorktree(repoPath: string, worktreePath: string): Promise<void> {
+  try {
+    // Git requires --force twice to remove a worktree that is itself locked,
+    // which is exactly the state left behind by an interrupted checkout.
+    await git(repoPath, "worktree", "remove", "--force", "--force", worktreePath);
+  } catch {
+    if (existsSync(worktreePath)) {
+      rmSync(worktreePath, { recursive: true, force: true });
+    }
+  }
+
+  try {
+    await git(repoPath, "worktree", "prune");
+  } catch {
+    // Best effort: preserve the original creation error.
+  }
+}
+
+async function assertMaterializedWorktree(
+  worktreePath: string,
+  expectedBranch: string,
+): Promise<void> {
+  const actualBranch = await git(worktreePath, "symbolic-ref", "--quiet", "--short", "HEAD");
+  if (actualBranch !== expectedBranch) {
+    throw new Error(
+      `worktree branch mismatch: expected "${expectedBranch}", observed "${actualBranch || "detached"}"`,
+    );
+  }
+
+  const status = await git(worktreePath, "status", "--porcelain", "--untracked-files=no");
+  if (status !== "") {
+    const changedEntries = status.split("\n").filter(Boolean).length;
+    throw new Error(
+      `worktree checkout is not fully materialized: observed ${changedEntries} tracked change(s)`,
+    );
+  }
+
+  const indexPath = await git(
+    worktreePath,
+    "rev-parse",
+    "--path-format=absolute",
+    "--git-path",
+    "index",
+  );
+  const indexLockPath = await git(
+    worktreePath,
+    "rev-parse",
+    "--path-format=absolute",
+    "--git-path",
+    "index.lock",
+  );
+  if (!indexPath || !existsSync(indexPath) || (indexLockPath && existsSync(indexLockPath))) {
+    throw new Error(
+      "worktree checkout is not fully materialized: git index is unavailable or locked",
+    );
+  }
+}
+
+async function recoverIncompleteTarget(
+  repoPath: string,
+  worktreePath: string,
+  expectedBranch: string,
+): Promise<void> {
+  if (!existsSync(worktreePath)) return;
+
+  try {
+    await assertMaterializedWorktree(worktreePath, expectedBranch);
+  } catch {
+    await cleanupFailedWorktree(repoPath, worktreePath);
+    return;
+  }
+
+  throw new Error(`worktree target already contains a complete checkout: ${worktreePath}`);
+}
+
+function parseInitializingWorktrees(output: string, projectWorktreeDir: string): string[] {
+  return output.split("\n\n").flatMap((block) => {
+    const lines = block.split("\n");
+    const worktreeLine = lines.find((line) => line.startsWith("worktree "));
+    const path = worktreeLine?.slice("worktree ".length) ?? "";
+    const isInitializing = lines.some((line) => line.trim() === "locked initializing");
+    const isProjectWorktree =
+      path.startsWith(`${projectWorktreeDir}/`) && path !== projectWorktreeDir;
+    return isInitializing && isProjectWorktree ? [path] : [];
+  });
+}
+
+async function recoverStaleInitializations(
+  repoPath: string,
+  projectWorktreeDir: string,
+  staleAfterMs: number,
+): Promise<void> {
+  if (!existsSync(projectWorktreeDir)) return;
+
+  let initializingPaths: string[];
+  try {
+    const output = await git(repoPath, "worktree", "list", "--porcelain");
+    initializingPaths = parseInitializingWorktrees(output, projectWorktreeDir);
+  } catch {
+    return;
+  }
+
+  for (const path of initializingPaths) {
+    try {
+      const indexLockPath = await git(
+        path,
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-path",
+        "index.lock",
+      );
+      const lockAgeMs = Date.now() - statSync(indexLockPath).mtimeMs;
+      if (lockAgeMs < staleAfterMs) continue;
+      await cleanupFailedWorktree(repoPath, path);
+    } catch {
+      // An unobservable lock is not safe to remove automatically.
+    }
+  }
 }
 
 /** Only allow safe characters in path segments to prevent directory traversal */
@@ -50,6 +179,10 @@ export function create(config?: Record<string, unknown>): Workspace {
   const worktreeBaseDir = config?.worktreeDir
     ? expandPath(config.worktreeDir as string)
     : join(homedir(), ".worktrees");
+  const initializationStaleMs =
+    typeof config?.initializationStaleMs === "number" && config.initializationStaleMs > 0
+      ? config.initializationStaleMs
+      : DEFAULT_INITIALIZATION_STALE_MS;
 
   return {
     name: "worktree",
@@ -63,6 +196,8 @@ export function create(config?: Record<string, unknown>): Workspace {
       const worktreePath = join(projectWorktreeDir, cfg.sessionId);
 
       mkdirSync(projectWorktreeDir, { recursive: true });
+      await recoverStaleInitializations(repoPath, projectWorktreeDir, initializationStaleMs);
+      await recoverIncompleteTarget(repoPath, worktreePath, cfg.branch);
 
       // Fetch latest from remote
       try {
@@ -73,6 +208,8 @@ export function create(config?: Record<string, unknown>): Workspace {
 
       const baseRef = `origin/${cfg.project.defaultBranch}`;
 
+      let creationError: unknown;
+
       // Create worktree with a new branch
       try {
         await git(repoPath, "worktree", "add", "-b", cfg.branch, worktreePath, baseRef);
@@ -80,27 +217,41 @@ export function create(config?: Record<string, unknown>): Workspace {
         // Only retry if the error is "branch already exists"
         const msg = err instanceof Error ? err.message : String(err);
         if (!msg.includes("already exists")) {
-          throw new Error(`Failed to create worktree for branch "${cfg.branch}": ${msg}`, {
-            cause: err,
-          });
-        }
-        // Branch already exists — create worktree and check it out
-        await git(repoPath, "worktree", "add", worktreePath, baseRef);
-        try {
-          await git(worktreePath, "checkout", cfg.branch);
-        } catch (checkoutErr: unknown) {
-          // Checkout failed — remove the orphaned worktree before rethrowing
+          creationError = new Error(
+            `Failed to create worktree for branch "${cfg.branch}": ${msg}`,
+            { cause: err },
+          );
+        } else {
+          // Branch already exists — create worktree and check it out
           try {
-            await git(repoPath, "worktree", "remove", "--force", worktreePath);
-          } catch {
-            // Best-effort cleanup
+            await git(repoPath, "worktree", "add", worktreePath, baseRef);
+            await git(worktreePath, "checkout", cfg.branch);
+          } catch (checkoutErr: unknown) {
+            const checkoutMsg =
+              checkoutErr instanceof Error ? checkoutErr.message : String(checkoutErr);
+            creationError = new Error(
+              `Failed to checkout branch "${cfg.branch}" in worktree: ${checkoutMsg}`,
+              { cause: checkoutErr },
+            );
           }
-          const checkoutMsg =
-            checkoutErr instanceof Error ? checkoutErr.message : String(checkoutErr);
-          throw new Error(`Failed to checkout branch "${cfg.branch}" in worktree: ${checkoutMsg}`, {
-            cause: checkoutErr,
-          });
         }
+      }
+
+      if (!creationError) {
+        try {
+          await assertMaterializedWorktree(worktreePath, cfg.branch);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          creationError = new Error(
+            `Failed to create worktree for branch "${cfg.branch}": ${msg}`,
+            { cause: err },
+          );
+        }
+      }
+
+      if (creationError) {
+        await cleanupFailedWorktree(repoPath, worktreePath);
+        throw creationError;
       }
 
       return {
@@ -223,27 +374,33 @@ export function create(config?: Record<string, unknown>): Workspace {
         // May fail if offline
       }
 
-      // Try to create worktree on the existing branch
-      try {
-        await git(repoPath, "worktree", "add", workspacePath, cfg.branch);
-      } catch {
-        // Branch might not exist locally — try from origin
-        const remoteBranch = `origin/${cfg.branch}`;
+      const attempts: string[][] = [
+        ["worktree", "add", workspacePath, cfg.branch],
+        ["worktree", "add", "-b", cfg.branch, workspacePath, `origin/${cfg.branch}`],
+        ["worktree", "add", "-b", cfg.branch, workspacePath, `origin/${cfg.project.defaultBranch}`],
+      ];
+      let lastError: unknown;
+
+      for (const args of attempts) {
         try {
-          await git(repoPath, "worktree", "add", "-b", cfg.branch, workspacePath, remoteBranch);
-        } catch {
-          // Last resort: create from default branch
-          const baseRef = `origin/${cfg.project.defaultBranch}`;
-          await git(repoPath, "worktree", "add", "-b", cfg.branch, workspacePath, baseRef);
+          await git(repoPath, ...args);
+          await assertMaterializedWorktree(workspacePath, cfg.branch);
+          return {
+            path: workspacePath,
+            branch: cfg.branch,
+            sessionId: cfg.sessionId,
+            projectId: cfg.projectId,
+          };
+        } catch (err) {
+          lastError = err;
+          await cleanupFailedWorktree(repoPath, workspacePath);
         }
       }
 
-      return {
-        path: workspacePath,
-        branch: cfg.branch,
-        sessionId: cfg.sessionId,
-        projectId: cfg.projectId,
-      };
+      const message = lastError instanceof Error ? lastError.message : String(lastError);
+      throw new Error(`Failed to restore worktree for branch "${cfg.branch}": ${message}`, {
+        cause: lastError,
+      });
     },
 
     async postCreate(info: WorkspaceInfo, project: ProjectConfig): Promise<void> {

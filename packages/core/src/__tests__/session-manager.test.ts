@@ -339,6 +339,34 @@ describe("spawn", () => {
     expect(mockRuntime.create).toHaveBeenCalled();
   });
 
+  it("persists a durable spawning record before workspace creation starts", async () => {
+    vi.mocked(mockWorkspace.create).mockImplementationOnce(async (workspaceConfig) => {
+      const creating = readMetadataRaw(sessionsDir, "app-1");
+      expect(creating).toMatchObject({
+        branch: "session/app-1",
+        status: "spawning",
+        project: "my-app",
+        agent: "mock-agent",
+      });
+      expect(creating?.["createdAt"]).toBeTruthy();
+      expect(creating?.["runtimeHandle"]).toBeUndefined();
+
+      return {
+        path: "/tmp/mock-ws/app-1",
+        branch: workspaceConfig.branch,
+        sessionId: workspaceConfig.sessionId,
+        projectId: workspaceConfig.projectId,
+      };
+    });
+
+    const sm = createSessionManager({ config, registry: mockRegistry });
+    await sm.spawn({ projectId: "my-app" });
+
+    const created = readMetadataRaw(sessionsDir, "app-1");
+    expect(created?.["worktree"]).toBe("/tmp/mock-ws/app-1");
+    expect(created?.["runtimeHandle"]).toBeTruthy();
+  });
+
   it("blocks spawn while the project is globally paused", async () => {
     writeMetadata(sessionsDir, "app-orchestrator", {
       worktree: join(tmpDir, "my-app"),
@@ -2097,6 +2125,8 @@ describe("cleanup", () => {
 
   it("archives terminal-status session metadata even without a runtime handle", async () => {
     writeMetadata(sessionsDir, "app-1", {
+      worktree: "",
+      branch: "",
       status: "killed",
       project: "my-app",
     });
@@ -2684,10 +2714,7 @@ describe("send", () => {
     ).rejects.toThrow("Could not confirm delivery to session app-1");
     expect(mockRuntime.create).not.toHaveBeenCalled();
     expect(mockRuntime.sendMessage).toHaveBeenCalledTimes(1);
-    expect(mockRuntime.sendMessage).toHaveBeenCalledWith(
-      makeHandle("rt-1"),
-      "Fix the CI failures",
-    );
+    expect(mockRuntime.sendMessage).toHaveBeenCalledWith(makeHandle("rt-1"), "Fix the CI failures");
   });
 
   it("delivers long codex tmux messages via file indirection to avoid paste corruption", async () => {

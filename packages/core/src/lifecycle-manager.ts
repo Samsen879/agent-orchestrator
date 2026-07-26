@@ -220,6 +220,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
   const observer = createProjectObserver(config, "lifecycle-manager");
 
   const states = new Map<SessionId, SessionStatus>();
+  const consecutiveIdleEvidence = new Map<SessionId, number>();
   const reactionTrackers = new Map<string, ReactionTracker>(); // "sessionId:reactionKey"
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let polling = false; // re-entrancy guard
@@ -261,7 +262,10 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     );
   }
 
-  async function hasActionableNonOrchestratorSessions(projectId: string, excludeSessionId?: string): Promise<boolean> {
+  async function hasActionableNonOrchestratorSessions(
+    projectId: string,
+    excludeSessionId?: string,
+  ): Promise<boolean> {
     const projectSessions = await sessionManager.list(projectId);
     return projectSessions.some((candidate) => {
       if (candidate.id === excludeSessionId) return false;
@@ -274,6 +278,13 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
   async function determineStatus(session: Session): Promise<SessionStatus> {
     const project = config.projects[session.projectId];
     if (!project) return session.status;
+
+    // Workspace and runtime creation are a transaction. A durable spawning
+    // record without a persisted runtime handle is still in the control-plane
+    // creation phase and must not be promoted to working or evaluated as stuck.
+    if (session.status === "spawning" && !session.metadata["runtimeHandle"]) {
+      return "spawning";
+    }
 
     const agentName = resolveAgentSelection({
       role: resolveSessionRole(session.id, session.metadata),
@@ -326,13 +337,44 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
               "runtime",
               project.runtime ?? config.defaults.runtime,
             );
-            const terminalOutput = runtime ? await runtime.getOutput(session.runtimeHandle, 10) : "";
+            const terminalOutput = runtime
+              ? await runtime.getOutput(session.runtimeHandle, 10)
+              : "";
             if (terminalOutput) {
               const refinedActivity = agent.detectActivity(terminalOutput);
               if (refinedActivity === "waiting_input") return "needs_input";
               if (refinedActivity === "idle") {
                 observedActivity = "idle";
                 detectedIdleTimestamp = new Date();
+              }
+            }
+          }
+
+          // A stale Codex JSONL mtime is not sufficient evidence of an idle
+          // worker: long-running tool calls can legitimately produce no JSONL
+          // writes for longer than the stuck threshold. Corroborate stale file
+          // activity with the visible terminal state before retaining idle
+          // evidence. Probe failure is unknown, never stuck.
+          if (
+            agentName === "codex" &&
+            (activityState.state === "idle" || activityState.state === "blocked")
+          ) {
+            const runtime = registry.get<Runtime>(
+              "runtime",
+              project.runtime ?? config.defaults.runtime,
+            );
+            const terminalOutput = runtime
+              ? await runtime.getOutput(session.runtimeHandle, 20)
+              : "";
+            if (!terminalOutput) {
+              observedActivity = null;
+              detectedIdleTimestamp = null;
+            } else {
+              const refinedActivity = agent.detectActivity(terminalOutput);
+              if (refinedActivity === "waiting_input") return "needs_input";
+              if (refinedActivity === "active" || refinedActivity === "ready") {
+                observedActivity = refinedActivity;
+                detectedIdleTimestamp = null;
               }
             }
           }
@@ -366,6 +408,13 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
         }
       }
     }
+
+    if (detectedIdleTimestamp && (observedActivity === "idle" || observedActivity === "blocked")) {
+      consecutiveIdleEvidence.set(session.id, (consecutiveIdleEvidence.get(session.id) ?? 0) + 1);
+    } else {
+      consecutiveIdleEvidence.delete(session.id);
+    }
+    const idleEvidenceConfirmed = (consecutiveIdleEvidence.get(session.id) ?? 0) >= 2;
 
     // 3. Auto-detect PR by branch if metadata.pr is missing.
     //    This is critical for agents without auto-hook systems (Codex, Aider,
@@ -438,7 +487,11 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
         // bypassed (getActivityState returned null) or the idle timestamp
         // wasn't available during step 2 but the session has been at pr_open
         // for a long time. Without this, sessions get stuck at "pr_open" forever.
-        if (detectedIdleTimestamp && isIdleBeyondThreshold(session, detectedIdleTimestamp)) {
+        if (
+          idleEvidenceConfirmed &&
+          detectedIdleTimestamp &&
+          isIdleBeyondThreshold(session, detectedIdleTimestamp)
+        ) {
           return "stuck";
         }
 
@@ -450,7 +503,11 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
 
     // 5. Post-all stuck detection: if we detected idle in step 2 but had no PR,
     // still check stuck threshold. This handles agents that finish without creating a PR.
-    if (detectedIdleTimestamp && isIdleBeyondThreshold(session, detectedIdleTimestamp)) {
+    if (
+      idleEvidenceConfirmed &&
+      detectedIdleTimestamp &&
+      isIdleBeyondThreshold(session, detectedIdleTimestamp)
+    ) {
       return "stuck";
     }
 
@@ -1067,7 +1124,10 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     const reactionConfig = getReactionConfigForSession(session, reactionKey);
     if (!reactionConfig?.action) return;
     if (reactionConfig.auto === false && reactionConfig.action !== "notify") return;
-    if (reactionConfig.action !== "send-to-agent" && reactionConfig.action !== "send-to-orchestrator") {
+    if (
+      reactionConfig.action !== "send-to-agent" &&
+      reactionConfig.action !== "send-to-orchestrator"
+    ) {
       return;
     }
 

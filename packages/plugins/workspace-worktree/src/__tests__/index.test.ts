@@ -19,6 +19,7 @@ vi.mock("node:fs", () => ({
   rmSync: vi.fn(),
   mkdirSync: vi.fn(),
   readdirSync: vi.fn(),
+  statSync: vi.fn(),
 }));
 
 vi.mock("node:os", () => ({
@@ -30,7 +31,15 @@ vi.mock("node:os", () => ({
 // ---------------------------------------------------------------------------
 
 import * as childProcess from "node:child_process";
-import { existsSync, lstatSync, symlinkSync, rmSync, mkdirSync, readdirSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  symlinkSync,
+  rmSync,
+  mkdirSync,
+  readdirSync,
+  statSync,
+} from "node:fs";
 import { create, manifest } from "../index.js";
 
 // ---------------------------------------------------------------------------
@@ -47,6 +56,7 @@ const mockSymlinkSync = symlinkSync as ReturnType<typeof vi.fn>;
 const mockRmSync = rmSync as ReturnType<typeof vi.fn>;
 const mockMkdirSync = mkdirSync as ReturnType<typeof vi.fn>;
 const mockReaddirSync = readdirSync as ReturnType<typeof vi.fn>;
+const mockStatSync = statSync as ReturnType<typeof vi.fn>;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -58,6 +68,13 @@ function mockGitSuccess(stdout: string) {
 
 function mockGitError(message: string) {
   mockExecFileAsync.mockRejectedValueOnce(new Error(message));
+}
+
+function mockSuccessfulMaterialization(branch = "feat/TEST-1") {
+  mockGitSuccess(branch); // symbolic-ref
+  mockGitSuccess(""); // clean tracked status
+  mockGitSuccess("/repo/path/.git/worktrees/session-1/index");
+  mockGitSuccess("/repo/path/.git/worktrees/session-1/index.lock");
 }
 
 function makeProject(overrides?: Partial<ProjectConfig>): ProjectConfig {
@@ -87,6 +104,9 @@ function makeCreateConfig(overrides?: Partial<WorkspaceCreateConfig>): Workspace
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockExistsSync.mockImplementation(
+    (path: unknown) => String(path).endsWith("/index") && !String(path).endsWith("/index.lock"),
+  );
 });
 
 // ===========================================================================
@@ -109,6 +129,7 @@ describe("create() factory", () => {
     // Mock: fetch, worktree add
     mockGitSuccess(""); // fetch
     mockGitSuccess(""); // worktree add
+    mockSuccessfulMaterialization();
 
     const info = await ws.create(makeCreateConfig());
 
@@ -120,6 +141,7 @@ describe("create() factory", () => {
 
     mockGitSuccess(""); // fetch
     mockGitSuccess(""); // worktree add
+    mockSuccessfulMaterialization();
 
     const info = await ws.create(makeCreateConfig());
 
@@ -131,6 +153,7 @@ describe("create() factory", () => {
 
     mockGitSuccess(""); // fetch
     mockGitSuccess(""); // worktree add
+    mockSuccessfulMaterialization();
 
     const info = await ws.create(makeCreateConfig());
 
@@ -144,12 +167,14 @@ describe("workspace.create()", () => {
 
     mockGitSuccess(""); // fetch
     mockGitSuccess(""); // worktree add
+    mockSuccessfulMaterialization();
 
     await ws.create(makeCreateConfig());
 
     // First call: git fetch origin --quiet
     expect(mockExecFileAsync).toHaveBeenCalledWith("git", ["fetch", "origin", "--quiet"], {
       cwd: "/repo/path",
+      timeout: 300_000,
     });
 
     // Second call: git worktree add -b <branch> <path> <baseRef>
@@ -163,7 +188,7 @@ describe("workspace.create()", () => {
         "/mock-home/.worktrees/myproject/session-1",
         "origin/main",
       ],
-      { cwd: "/repo/path" },
+      { cwd: "/repo/path", timeout: 300_000 },
     );
   });
 
@@ -172,6 +197,7 @@ describe("workspace.create()", () => {
 
     mockGitSuccess(""); // fetch
     mockGitSuccess(""); // worktree add
+    mockSuccessfulMaterialization();
 
     await ws.create(makeCreateConfig());
 
@@ -185,10 +211,122 @@ describe("workspace.create()", () => {
 
     mockGitError("Could not resolve host"); // fetch fails
     mockGitSuccess(""); // worktree add succeeds
+    mockSuccessfulMaterialization();
 
     const info = await ws.create(makeCreateConfig());
 
     expect(info.path).toBe("/mock-home/.worktrees/myproject/session-1");
+  });
+
+  it("recovers an incomplete checkout at the reserved session path before creating", async () => {
+    const ws = create();
+    const worktreePath = "/mock-home/.worktrees/myproject/session-1";
+    mockExistsSync.mockImplementation((path: unknown) => {
+      const value = String(path);
+      return value === worktreePath || (value.endsWith("/index") && !value.endsWith("/index.lock"));
+    });
+
+    mockGitError("fatal: not a valid worktree"); // incomplete-target readiness probe
+    mockGitSuccess(""); // worktree remove
+    mockGitSuccess(""); // worktree prune
+    mockGitSuccess(""); // fetch
+    mockGitSuccess(""); // worktree add
+    mockSuccessfulMaterialization();
+
+    const info = await ws.create(makeCreateConfig());
+
+    expect(info.path).toBe(worktreePath);
+    expect(mockExecFileAsync).toHaveBeenCalledWith(
+      "git",
+      ["worktree", "remove", "--force", "--force", worktreePath],
+      { cwd: "/repo/path", timeout: 300_000 },
+    );
+  });
+
+  it("removes only stale initializing worktrees before a new checkout", async () => {
+    const ws = create({ initializationStaleMs: 60_000 });
+    const projectDir = "/mock-home/.worktrees/myproject";
+    const stalePath = `${projectDir}/session-old`;
+    mockExistsSync.mockImplementation((path: unknown) => {
+      const value = String(path);
+      return value === projectDir || (value.endsWith("/index") && !value.endsWith("/index.lock"));
+    });
+    mockStatSync.mockReturnValue({ mtimeMs: Date.now() - 120_000 });
+
+    mockGitSuccess(
+      [
+        `worktree ${stalePath}`,
+        "HEAD abc123",
+        "detached",
+        "locked initializing",
+        "",
+        "worktree /repo/path",
+        "HEAD def456",
+        "branch refs/heads/main",
+      ].join("\n"),
+    );
+    mockGitSuccess("/repo/path/.git/worktrees/session-old/index.lock");
+    mockGitSuccess(""); // stale worktree remove
+    mockGitSuccess(""); // worktree prune
+    mockGitSuccess(""); // fetch
+    mockGitSuccess(""); // new worktree add
+    mockSuccessfulMaterialization();
+
+    await ws.create(makeCreateConfig());
+
+    expect(mockExecFileAsync).toHaveBeenCalledWith(
+      "git",
+      ["worktree", "remove", "--force", "--force", stalePath],
+      { cwd: "/repo/path", timeout: 300_000 },
+    );
+  });
+
+  it("preserves a recent initializing worktree from a concurrent spawn", async () => {
+    const ws = create({ initializationStaleMs: 60_000 });
+    const projectDir = "/mock-home/.worktrees/myproject";
+    const activePath = `${projectDir}/session-active`;
+    mockExistsSync.mockImplementation((path: unknown) => {
+      const value = String(path);
+      return value === projectDir || (value.endsWith("/index") && !value.endsWith("/index.lock"));
+    });
+    mockStatSync.mockReturnValue({ mtimeMs: Date.now() - 10_000 });
+
+    mockGitSuccess(
+      [`worktree ${activePath}`, "HEAD abc123", "detached", "locked initializing"].join("\n"),
+    );
+    mockGitSuccess("/repo/path/.git/worktrees/session-active/index.lock");
+    mockGitSuccess(""); // fetch
+    mockGitSuccess(""); // new worktree add
+    mockSuccessfulMaterialization();
+
+    await ws.create(makeCreateConfig());
+
+    expect(mockExecFileAsync).not.toHaveBeenCalledWith(
+      "git",
+      ["worktree", "remove", "--force", "--force", activePath],
+      expect.anything(),
+    );
+  });
+
+  it("rejects and cleans a checkout that reports tracked deletions after worktree add", async () => {
+    const ws = create();
+
+    mockGitSuccess(""); // fetch
+    mockGitSuccess(""); // worktree add
+    mockGitSuccess("feat/TEST-1"); // symbolic-ref
+    mockGitSuccess("D  package.json\nD  src/index.ts"); // incomplete tracked status
+    mockGitSuccess(""); // worktree remove
+    mockGitSuccess(""); // worktree prune
+
+    await expect(ws.create(makeCreateConfig())).rejects.toThrow(
+      "worktree checkout is not fully materialized: observed 2 tracked change(s)",
+    );
+
+    expect(mockExecFileAsync).toHaveBeenCalledWith(
+      "git",
+      ["worktree", "remove", "--force", "--force", "/mock-home/.worktrees/myproject/session-1"],
+      { cwd: "/repo/path", timeout: 300_000 },
+    );
   });
 
   it("handles branch already exists by adding worktree then checking out", async () => {
@@ -198,6 +336,7 @@ describe("workspace.create()", () => {
     mockGitError("already exists"); // worktree add -b fails
     mockGitSuccess(""); // worktree add (without -b)
     mockGitSuccess(""); // checkout
+    mockSuccessfulMaterialization();
 
     const info = await ws.create(makeCreateConfig());
 
@@ -205,12 +344,13 @@ describe("workspace.create()", () => {
     expect(mockExecFileAsync).toHaveBeenCalledWith(
       "git",
       ["worktree", "add", "/mock-home/.worktrees/myproject/session-1", "origin/main"],
-      { cwd: "/repo/path" },
+      { cwd: "/repo/path", timeout: 300_000 },
     );
 
     // Fourth call: checkout
     expect(mockExecFileAsync).toHaveBeenCalledWith("git", ["checkout", "feat/TEST-1"], {
       cwd: "/mock-home/.worktrees/myproject/session-1",
+      timeout: 300_000,
     });
 
     expect(info.branch).toBe("feat/TEST-1");
@@ -232,8 +372,8 @@ describe("workspace.create()", () => {
     // Verify cleanup was attempted
     expect(mockExecFileAsync).toHaveBeenCalledWith(
       "git",
-      ["worktree", "remove", "--force", "/mock-home/.worktrees/myproject/session-1"],
-      { cwd: "/repo/path" },
+      ["worktree", "remove", "--force", "--force", "/mock-home/.worktrees/myproject/session-1"],
+      { cwd: "/repo/path", timeout: 300_000 },
     );
   });
 
@@ -299,6 +439,7 @@ describe("workspace.create()", () => {
 
     mockGitSuccess(""); // fetch
     mockGitSuccess(""); // worktree add
+    mockSuccessfulMaterialization();
 
     const info = await ws.create(makeCreateConfig());
 
@@ -315,6 +456,7 @@ describe("workspace.create()", () => {
 
     mockGitSuccess(""); // fetch
     mockGitSuccess(""); // worktree add
+    mockSuccessfulMaterialization();
 
     await ws.create(
       makeCreateConfig({
@@ -325,6 +467,7 @@ describe("workspace.create()", () => {
     // fetch should use expanded path
     expect(mockExecFileAsync).toHaveBeenCalledWith("git", ["fetch", "origin", "--quiet"], {
       cwd: "/mock-home/my-repo",
+      timeout: 300_000,
     });
   });
 });
@@ -344,14 +487,14 @@ describe("workspace.destroy()", () => {
     expect(mockExecFileAsync).toHaveBeenCalledWith(
       "git",
       ["rev-parse", "--path-format=absolute", "--git-common-dir"],
-      { cwd: "/mock-home/.worktrees/myproject/session-1" },
+      { cwd: "/mock-home/.worktrees/myproject/session-1", timeout: 300_000 },
     );
 
     // Second call: worktree remove
     expect(mockExecFileAsync).toHaveBeenCalledWith(
       "git",
       ["worktree", "remove", "--force", "/mock-home/.worktrees/myproject/session-1"],
-      { cwd: "/repo/path" },
+      { cwd: "/repo/path", timeout: 300_000 },
     );
   });
 
