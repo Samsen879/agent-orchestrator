@@ -131,9 +131,10 @@ function mockTmuxWithProcess(processName: string, found = true) {
 function makeFakeFileHandle(content: string) {
   const buf = Buffer.from(content, "utf-8");
   return {
-    read: vi.fn().mockImplementation((buffer: Buffer, offset: number, length: number, _position: number) => {
-      const bytesToCopy = Math.min(length, buf.length);
-      buf.copy(buffer, offset, 0, bytesToCopy);
+    read: vi.fn().mockImplementation((buffer: Buffer, offset: number, length: number, position: number | null) => {
+      const start = position ?? 0;
+      const bytesToCopy = Math.max(0, Math.min(length, buf.length - start));
+      buf.copy(buffer, offset, start, start + bytesToCopy);
       return Promise.resolve({ bytesRead: bytesToCopy, buffer });
     }),
     close: vi.fn().mockResolvedValue(undefined),
@@ -275,16 +276,17 @@ describe("getLaunchCommand", () => {
     expect(cmd).toContain("-- '$(rm -rf /); `evil`; $HOME'");
   });
 
-  it("includes -c model_instructions_file when systemPromptFile is set", () => {
+  it("includes developer_instructions command substitution when systemPromptFile is set", () => {
     const cmd = agent.getLaunchCommand(makeLaunchConfig({ systemPromptFile: "/tmp/prompt.md" }));
-    expect(cmd).toContain("-c model_instructions_file='/tmp/prompt.md'");
+    expect(cmd).toContain("-c developer_instructions=\"$(cat '/tmp/prompt.md')\"");
+    expect(cmd).not.toContain("model_instructions_file");
   });
 
   it("prefers systemPromptFile over systemPrompt", () => {
     const cmd = agent.getLaunchCommand(
       makeLaunchConfig({ systemPromptFile: "/tmp/prompt.md", systemPrompt: "Ignored" }),
     );
-    expect(cmd).toContain("model_instructions_file='/tmp/prompt.md'");
+    expect(cmd).toContain("developer_instructions=\"$(cat '/tmp/prompt.md')\"");
     expect(cmd).not.toContain("'Ignored'");
   });
 
@@ -693,6 +695,39 @@ describe("getActivityState", () => {
     expect(result?.timestamp).toBeInstanceOf(Date);
   });
 
+  it("falls back to runtimeHandle.data.workspacePath when session workspacePath drifts", async () => {
+    mockTmuxWithProcess("codex", true);
+    const content =
+      '{"timestamp":"2026-04-05T16:31:01.190Z","type":"session_meta","payload":{"cwd":"/workspace/runtime","model":"gpt-5.4"}}\n';
+    mockReaddir.mockResolvedValue(["sess.jsonl"]);
+    setupMockOpen(content);
+    mockStat.mockResolvedValue({ mtimeMs: Date.now(), mtime: new Date() });
+
+    const session = makeSession({
+      runtimeHandle: { id: "test-session", runtimeName: "tmux", data: { workspacePath: "/workspace/runtime" } },
+      workspacePath: "/workspace/metadata",
+    });
+    const result = await agent.getActivityState(session);
+
+    expect(result?.state).toBe("active");
+    expect(result?.timestamp).toBeInstanceOf(Date);
+  });
+
+  it("matches session files when session_meta stores cwd under payload.cwd", async () => {
+    mockTmuxWithProcess("codex");
+    const content =
+      '{"timestamp":"2026-04-05T16:31:01.190Z","type":"session_meta","payload":{"cwd":"/workspace/test","model":"gpt-5.4"}}\n';
+    mockReaddir.mockResolvedValue(["sess.jsonl"]);
+    setupMockOpen(content);
+    mockStat.mockResolvedValue({ mtimeMs: Date.now(), mtime: new Date() });
+
+    const session = makeSession({ runtimeHandle: makeTmuxHandle(), workspacePath: "/workspace/test" });
+    const result = await agent.getActivityState(session);
+
+    expect(result?.state).toBe("active");
+    expect(result?.timestamp).toBeInstanceOf(Date);
+  });
+
   it("returns idle when session file is stale", async () => {
     mockTmuxWithProcess("codex");
     const content = '{"type":"session_meta","cwd":"/workspace/test"}\n';
@@ -783,6 +818,68 @@ describe("getSessionInfo", () => {
     expect(result!.cost!.inputTokens).toBe(3000);
     expect(result!.cost!.outputTokens).toBe(800);
     expect(result!.cost!.estimatedCostUsd).toBeGreaterThan(0);
+  });
+
+  it("falls back to runtimeHandle.data.workspacePath for session info when metadata worktree drifts", async () => {
+    const sessionContent = jsonl(
+      { type: "session_meta", cwd: "/workspace/runtime", model: "o3-mini" },
+      { type: "event_msg", msg: { type: "token_count", input_tokens: 1000, output_tokens: 500 } },
+    );
+
+    mockReaddir.mockResolvedValue(["session-123.jsonl"]);
+    setupMockOpen(sessionContent);
+    setupMockStream(sessionContent);
+    mockStat.mockResolvedValue({ mtimeMs: 1000 });
+
+    const result = await agent.getSessionInfo(
+      makeSession({
+        workspacePath: "/workspace/metadata",
+        runtimeHandle: {
+          id: "test-session",
+          runtimeName: "tmux",
+          data: { workspacePath: "/workspace/runtime" },
+        },
+      }),
+    );
+
+    expect(result).not.toBeNull();
+    expect(result!.agentSessionId).toBe("session-123");
+    expect(result!.summary).toBe("Codex session (o3-mini)");
+  });
+
+  it("parses payload-wrapped session_meta and token_count events", async () => {
+    const sessionContent = jsonl(
+      {
+        timestamp: "2026-04-05T16:31:01.190Z",
+        type: "session_meta",
+        payload: { cwd: "/workspace/test", model: "gpt-5.4" },
+      },
+      {
+        timestamp: "2026-04-05T16:31:58.405Z",
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: {
+            total_token_usage: { input_tokens: 119660, output_tokens: 2373 },
+            last_token_usage: { input_tokens: 32409, output_tokens: 678 },
+          },
+        },
+      },
+    );
+
+    mockReaddir.mockResolvedValue(["session-live.jsonl"]);
+    setupMockOpen(sessionContent);
+    setupMockStream(sessionContent);
+    mockStat.mockResolvedValue({ mtimeMs: 1000 });
+
+    const result = await agent.getSessionInfo(makeSession({ workspacePath: "/workspace/test" }));
+
+    expect(result).not.toBeNull();
+    expect(result!.agentSessionId).toBe("session-live");
+    expect(result!.summary).toBe("Codex session (gpt-5.4)");
+    expect(result!.cost).toBeDefined();
+    expect(result!.cost!.inputTokens).toBe(32409);
+    expect(result!.cost!.outputTokens).toBe(678);
   });
 
   it("picks the most recently modified matching session file", async () => {
@@ -946,6 +1043,62 @@ describe("getSessionInfo", () => {
     expect(result).not.toBeNull();
     expect(result!.agentSessionId).toBe("rollout-abc");
     expect(result!.summary).toBe("Codex session (o3-mini)");
+  });
+
+  it("checks newer rollout files first and stops after the first matching workspace", async () => {
+    mockReaddir.mockResolvedValue(["rollout-old.jsonl", "rollout-new.jsonl"]);
+    mockStat.mockImplementation((filePath: string) => {
+      if (filePath.endsWith("rollout-new.jsonl")) {
+        return Promise.resolve({ mtimeMs: 2_000 });
+      }
+      if (filePath.endsWith("rollout-old.jsonl")) {
+        return Promise.resolve({ mtimeMs: 1_000 });
+      }
+      return Promise.reject(new Error(`unexpected stat path: ${filePath}`));
+    });
+    mockOpen.mockImplementation((filePath: string) => {
+      if (filePath.endsWith("rollout-new.jsonl")) {
+        return Promise.resolve(
+          makeFakeFileHandle(jsonl({ type: "session_meta", cwd: "/workspace/test", model: "gpt-5.4" })),
+        );
+      }
+      throw new Error(`old rollout should not be opened once the newest match is found: ${filePath}`);
+    });
+    setupMockStream(jsonl({ type: "session_meta", cwd: "/workspace/test", model: "gpt-5.4" }));
+
+    const result = await agent.getSessionInfo(makeSession({ workspacePath: "/workspace/test" }));
+
+    expect(result).not.toBeNull();
+    expect(result!.agentSessionId).toBe("rollout-new");
+    expect(mockOpen).toHaveBeenCalledTimes(1);
+    expect(mockOpen).toHaveBeenCalledWith(
+      "/mock/home/.codex/sessions/rollout-new.jsonl",
+      "r",
+    );
+  });
+
+  it("matches session files when the session_meta line exceeds 4 KB", async () => {
+    mockReaddir.mockResolvedValue(["sess.jsonl"]);
+    mockStat.mockResolvedValue({ mtimeMs: 3_000 });
+
+    const hugeMeta = JSON.stringify({
+      type: "session_meta",
+      payload: {
+        cwd: "/workspace/test",
+        model: "gpt-5.4",
+        base_instructions: { text: "x".repeat(10_000) },
+      },
+    });
+    const content = `${hugeMeta}\n${JSON.stringify({ type: "event_msg", payload: { type: "token_count" } })}\n`;
+
+    setupMockOpen(content);
+    setupMockStream(content);
+
+    const result = await agent.getSessionInfo(makeSession({ workspacePath: "/workspace/test" }));
+
+    expect(result).not.toBeNull();
+    expect(result!.agentSessionId).toBe("sess");
+    expect(result!.summary).toBe("Codex session (gpt-5.4)");
   });
 
   it("ignores non-JSONL files in sessions directory", async () => {

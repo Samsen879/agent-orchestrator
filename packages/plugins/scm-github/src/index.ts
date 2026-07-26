@@ -445,6 +445,97 @@ function parseDate(val: string | undefined | null): Date {
   return isNaN(d.getTime()) ? new Date(0) : d;
 }
 
+interface GitHubReviewThreadCommentNode {
+  id: string;
+  author: { login: string } | null;
+  body: string;
+  path: string | null;
+  line: number | null;
+  originalLine: number | null;
+  url: string;
+  createdAt: string;
+}
+
+interface GitHubReviewThreadNode {
+  isResolved: boolean;
+  isOutdated: boolean;
+  comments: {
+    nodes: GitHubReviewThreadCommentNode[];
+  };
+}
+
+async function getReviewThreads(pr: PRInfo): Promise<GitHubReviewThreadNode[]> {
+  const raw = await gh([
+    "api",
+    "graphql",
+    "-f",
+    `owner=${pr.owner}`,
+    "-f",
+    `name=${pr.repo}`,
+    "-F",
+    `number=${pr.number}`,
+    "-f",
+    `query=query($owner: String!, $name: String!, $number: Int!) {
+      repository(owner: $owner, name: $name) {
+        pullRequest(number: $number) {
+          reviewThreads(first: 100) {
+            nodes {
+              isResolved
+              isOutdated
+              comments(first: 1) {
+                nodes {
+                  id
+                  author { login }
+                  body
+                  path
+                  line
+                  originalLine
+                  url
+                  createdAt
+                }
+              }
+            }
+          }
+        }
+      }
+    }`,
+  ]);
+
+  const data: {
+    data: {
+      repository: {
+        pullRequest: {
+          reviewThreads: {
+            nodes: GitHubReviewThreadNode[];
+          };
+        };
+      };
+    };
+  } = JSON.parse(raw);
+
+  return data.data.repository.pullRequest.reviewThreads.nodes;
+}
+
+function classifyAutomatedCommentSeverity(body: string): AutomatedComment["severity"] {
+  const bodyLower = body.toLowerCase();
+  if (
+    bodyLower.includes("error") ||
+    bodyLower.includes("bug") ||
+    bodyLower.includes("critical") ||
+    bodyLower.includes("potential issue")
+  ) {
+    return "error";
+  }
+  if (
+    bodyLower.includes("warning") ||
+    bodyLower.includes("suggest") ||
+    bodyLower.includes("consider")
+  ) {
+    return "warning";
+  }
+  return "info";
+}
+
 // ---------------------------------------------------------------------------
 // SCM implementation
 // ---------------------------------------------------------------------------
@@ -775,73 +866,13 @@ function createGitHubSCM(): SCM {
 
     async getPendingComments(pr: PRInfo): Promise<ReviewComment[]> {
       try {
-        // Use GraphQL with variables to get review threads with actual isResolved status
-        const raw = await gh([
-          "api",
-          "graphql",
-          "-f",
-          `owner=${pr.owner}`,
-          "-f",
-          `name=${pr.repo}`,
-          "-F",
-          `number=${pr.number}`,
-          "-f",
-          `query=query($owner: String!, $name: String!, $number: Int!) {
-            repository(owner: $owner, name: $name) {
-              pullRequest(number: $number) {
-                reviewThreads(first: 100) {
-                  nodes {
-                    isResolved
-                    comments(first: 1) {
-                      nodes {
-                        id
-                        author { login }
-                        body
-                        path
-                        line
-                        url
-                        createdAt
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }`,
-        ]);
-
-        const data: {
-          data: {
-            repository: {
-              pullRequest: {
-                reviewThreads: {
-                  nodes: Array<{
-                    isResolved: boolean;
-                    comments: {
-                      nodes: Array<{
-                        id: string;
-                        author: { login: string } | null;
-                        body: string;
-                        path: string | null;
-                        line: number | null;
-                        url: string;
-                        createdAt: string;
-                      }>;
-                    };
-                  }>;
-                };
-              };
-            };
-          };
-        } = JSON.parse(raw);
-
-        const threads = data.data.repository.pullRequest.reviewThreads.nodes;
+        const threads = await getReviewThreads(pr);
 
         return threads
           .filter((t) => {
-            if (t.isResolved) return false; // only pending (unresolved) threads
+            if (t.isResolved || t.isOutdated) return false;
             const c = t.comments.nodes[0];
-            if (!c) return false; // skip threads with no comments
+            if (!c) return false;
             const author = c.author?.login ?? "";
             return !BOT_AUTHORS.has(author);
           })
@@ -852,7 +883,7 @@ function createGitHubSCM(): SCM {
               author: c.author?.login ?? "unknown",
               body: c.body,
               path: c.path || undefined,
-              line: c.line ?? undefined,
+              line: c.line ?? c.originalLine ?? undefined,
               isResolved: t.isResolved,
               createdAt: parseDate(c.createdAt),
               url: c.url,
@@ -865,76 +896,27 @@ function createGitHubSCM(): SCM {
 
     async getAutomatedComments(pr: PRInfo): Promise<AutomatedComment[]> {
       try {
-        const perPage = 100;
-        const comments: Array<{
-          id: number;
-          user: { login: string };
-          body: string;
-          path: string;
-          line: number | null;
-          original_line: number | null;
-          created_at: string;
-          html_url: string;
-        }> = [];
+        const threads = await getReviewThreads(pr);
 
-        for (let page = 1; ; page++) {
-          const raw = await gh([
-            "api",
-            "--method",
-            "GET",
-            `repos/${repoFlag(pr)}/pulls/${pr.number}/comments?per_page=${perPage}&page=${page}`,
-          ]);
-          const pageComments: Array<{
-            id: number;
-            user: { login: string };
-            body: string;
-            path: string;
-            line: number | null;
-            original_line: number | null;
-            created_at: string;
-            html_url: string;
-          }> = JSON.parse(raw);
-
-          if (pageComments.length === 0) {
-            break;
-          }
-
-          comments.push(...pageComments);
-          if (pageComments.length < perPage) {
-            break;
-          }
-        }
-
-        return comments
-          .filter((c) => BOT_AUTHORS.has(c.user?.login ?? ""))
-          .map((c) => {
-            // Determine severity from body content
-            let severity: AutomatedComment["severity"] = "info";
-            const bodyLower = c.body.toLowerCase();
-            if (
-              bodyLower.includes("error") ||
-              bodyLower.includes("bug") ||
-              bodyLower.includes("critical") ||
-              bodyLower.includes("potential issue")
-            ) {
-              severity = "error";
-            } else if (
-              bodyLower.includes("warning") ||
-              bodyLower.includes("suggest") ||
-              bodyLower.includes("consider")
-            ) {
-              severity = "warning";
-            }
-
+        return threads
+          .filter((t) => {
+            if (t.isResolved || t.isOutdated) return false;
+            const c = t.comments.nodes[0];
+            if (!c) return false;
+            const author = c.author?.login ?? "";
+            return BOT_AUTHORS.has(author);
+          })
+          .map((t) => {
+            const c = t.comments.nodes[0];
             return {
-              id: String(c.id),
-              botName: c.user?.login ?? "unknown",
+              id: c.id,
+              botName: c.author?.login ?? "unknown",
               body: c.body,
               path: c.path || undefined,
-              line: c.line ?? c.original_line ?? undefined,
-              severity,
-              createdAt: parseDate(c.created_at),
-              url: c.html_url,
+              line: c.line ?? c.originalLine ?? undefined,
+              severity: classifyAutomatedCommentSeverity(c.body),
+              createdAt: parseDate(c.createdAt),
+              url: c.url,
             };
           });
       } catch (err) {

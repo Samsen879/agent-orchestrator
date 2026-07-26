@@ -4,7 +4,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { Socket } from "node:net";
+import { createServer, Socket } from "node:net";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { resolve, dirname } from "node:path";
@@ -17,24 +17,76 @@ const require = createRequire(import.meta.url);
 /** Default terminal server base port (14800 range: zero IANA registrations, no dev tool conflicts) */
 const DEFAULT_TERMINAL_PORT = 14800;
 
-/**
- * Check if a TCP port is available by attempting to connect to it.
- * A successful connect means something is already listening (port in use).
- * ECONNREFUSED means nothing is listening (port free).
- *
- * Connect-based detection is more reliable than bind-based because it works
- * regardless of whether the occupying process is bound to 127.0.0.1, ::1,
- * 0.0.0.0, or :: (IPv6 wildcard).
- */
-export function isPortAvailable(port: number): Promise<boolean> {
-  return new Promise((resolve) => {
-    const s = new Socket();
-    s.setTimeout(300);
-    s.once("connect", () => { s.destroy(); resolve(false); }); // something listening → in use
-    s.once("error", () => { s.destroy(); resolve(true); });    // ECONNREFUSED → free
-    s.once("timeout", () => { s.destroy(); resolve(true); });  // no response → free
-    s.connect(port, "127.0.0.1");
+type BindProbeResult = "available" | "busy" | "unsupported";
+
+function probeBind(port: number, host: string, ipv6Only?: boolean): Promise<BindProbeResult> {
+  return new Promise((resolveProbe) => {
+    const server = createServer();
+    let settled = false;
+
+    const settle = (result: BindProbeResult): void => {
+      if (settled) return;
+      settled = true;
+      resolveProbe(result);
+    };
+
+    server.unref();
+    server.once("error", (error: NodeJS.ErrnoException) => {
+      if (error.code === "EAFNOSUPPORT" || error.code === "EADDRNOTAVAIL") {
+        settle("unsupported");
+        return;
+      }
+      settle("busy");
+    });
+    server.once("listening", () => {
+      server.close(() => settle("available"));
+    });
+    server.listen({ port, host, exclusive: true, ipv6Only });
   });
+}
+
+/**
+ * Check whether both IPv4 and IPv6 can bind a TCP port.
+ *
+ * A connect-only probe against 127.0.0.1 misses IPv6-only listeners. That can
+ * report a port as free immediately before Next.js binds to `::` and fails with
+ * EADDRINUSE. Binding each address family independently mirrors the operation
+ * the dashboard is about to perform and closes that false-negative path.
+ */
+export async function isPortAvailable(port: number): Promise<boolean> {
+  const ipv6 = await probeBind(port, "::", true);
+  if (ipv6 === "busy") return false;
+
+  const ipv4 = await probeBind(port, "0.0.0.0");
+  return ipv4 === "available";
+}
+
+function probeConnect(port: number, host: string): Promise<boolean> {
+  return new Promise((resolveProbe) => {
+    const socket = new Socket();
+    let settled = false;
+    const settle = (listening: boolean): void => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolveProbe(listening);
+    };
+
+    socket.setTimeout(200);
+    socket.once("connect", () => settle(true));
+    socket.once("error", () => settle(false));
+    socket.once("timeout", () => settle(false));
+    socket.connect(port, host);
+  });
+}
+
+/** Check readiness without binding the port and racing the service being started. */
+export async function isPortListening(port: number): Promise<boolean> {
+  const [ipv4, ipv6] = await Promise.all([
+    probeConnect(port, "127.0.0.1"),
+    probeConnect(port, "::1"),
+  ]);
+  return ipv4 || ipv6;
 }
 
 /** How many consecutive ports to scan before giving up. */
@@ -65,8 +117,7 @@ export async function waitForPortAndOpen(
 ): Promise<void> {
   const start = Date.now();
   while (!signal.aborted && Date.now() - start < timeoutMs) {
-    const free = await isPortAvailable(port);
-    if (!free) {
+    if (await isPortListening(port)) {
       // Windows: `start` is a cmd.exe builtin (no start.exe), so must run via shell.
       // The empty "" arg is the window title required by `start` before the URL.
       const [cmd, args]: [string, string[]] =
@@ -125,8 +176,11 @@ export async function buildDashboardEnv(
 
   // If explicit ports provided (config or env var), use them directly.
   // Otherwise, auto-detect an available pair starting from the default.
-  const explicitTerminal = terminalPort ?? (env["TERMINAL_PORT"] ? parseInt(env["TERMINAL_PORT"], 10) : undefined);
-  const explicitDirect = directTerminalPort ?? (env["DIRECT_TERMINAL_PORT"] ? parseInt(env["DIRECT_TERMINAL_PORT"], 10) : undefined);
+  const explicitTerminal =
+    terminalPort ?? (env["TERMINAL_PORT"] ? parseInt(env["TERMINAL_PORT"], 10) : undefined);
+  const explicitDirect =
+    directTerminalPort ??
+    (env["DIRECT_TERMINAL_PORT"] ? parseInt(env["DIRECT_TERMINAL_PORT"], 10) : undefined);
 
   let resolvedTerminal: number;
   let resolvedDirect: number;
@@ -181,8 +235,8 @@ export function findWebDir(): string {
     }
     throw new Error(
       "Could not find @composio/ao-web package.\n" +
-      "  If installed via npm:    npm install -g @composio/ao\n" +
-      "  If cloned from source:   pnpm install && pnpm build",
+        "  If installed via npm:    npm install -g @composio/ao\n" +
+        "  If cloned from source:   pnpm install && pnpm build",
     );
   }
 }

@@ -2,8 +2,19 @@ import { spawn } from "node:child_process";
 import chalk from "chalk";
 import type { Command } from "commander";
 import { loadConfig } from "@composio/ao-core";
-import { findWebDir, buildDashboardEnv, waitForPortAndOpen } from "../lib/web-dir.js";
-import { cleanNextCache, findRunningDashboardPid, findProcessWebDir, waitForPortFree } from "../lib/dashboard-rebuild.js";
+import {
+  findWebDir,
+  buildDashboardEnv,
+  isPortAvailable,
+  waitForPortAndOpen,
+} from "../lib/web-dir.js";
+import {
+  cleanNextCache,
+  findRunningDashboardPid,
+  findProcessWebDir,
+  waitForPortFree,
+} from "../lib/dashboard-rebuild.js";
+import { stopDashboardProcessTree, waitForDashboardReady } from "../lib/dashboard-process.js";
 
 export function registerDashboard(program: Command): void {
   program
@@ -31,9 +42,7 @@ export function registerDashboard(program: Command): void {
 
         if (runningPid) {
           // Kill the running server, clean .next, then start fresh below.
-          console.log(
-            chalk.dim(`Stopping dashboard (PID ${runningPid}) on port ${port}...`),
-          );
+          console.log(chalk.dim(`Stopping dashboard (PID ${runningPid}) on port ${port}...`));
           try {
             process.kill(parseInt(runningPid, 10), "SIGTERM");
           } catch {
@@ -45,6 +54,16 @@ export function registerDashboard(program: Command): void {
 
         await cleanNextCache(targetWebDir);
         // Fall through to start the dashboard on this port.
+      }
+
+      if (!(await isPortAvailable(port))) {
+        console.error(
+          chalk.red(
+            `Port ${port} is already in use. Stop the existing dashboard or choose another port with --port.`,
+          ),
+        );
+        process.exit(1);
+        return;
       }
 
       const webDir = localWebDir;
@@ -62,6 +81,7 @@ export function registerDashboard(program: Command): void {
         cwd: webDir,
         stdio: ["inherit", "inherit", "pipe"],
         env,
+        detached: process.platform !== "win32",
       });
 
       const stderrChunks: string[] = [];
@@ -77,11 +97,43 @@ export function registerDashboard(program: Command): void {
         process.stderr.write(data);
       });
 
-      child.on("error", (err) => {
+      child.once("error", (err) => {
         console.error(chalk.red("Could not start dashboard. Ensure Next.js is installed."));
         console.error(chalk.dim(String(err)));
         process.exit(1);
       });
+
+      let shuttingDown = false;
+      const signalHandlers = new Map<NodeJS.Signals, () => void>();
+      const removeSignalHandlers = (): void => {
+        for (const [signal, handler] of signalHandlers) {
+          process.off(signal, handler);
+        }
+      };
+      const shutdown = async (signal: NodeJS.Signals): Promise<void> => {
+        if (shuttingDown) return;
+        shuttingDown = true;
+        removeSignalHandlers();
+        await stopDashboardProcessTree(child);
+        process.exit(signal === "SIGINT" ? 130 : 143);
+      };
+      for (const signal of ["SIGINT", "SIGTERM"] as const) {
+        const handler = (): void => {
+          void shutdown(signal);
+        };
+        signalHandlers.set(signal, handler);
+        process.once(signal, handler);
+      }
+
+      try {
+        await waitForDashboardReady(child, [port]);
+      } catch (err) {
+        removeSignalHandlers();
+        await stopDashboardProcessTree(child);
+        console.error(chalk.red(err instanceof Error ? err.message : String(err)));
+        process.exit(1);
+        return;
+      }
 
       let openAbort: AbortController | undefined;
 
@@ -91,6 +143,7 @@ export function registerDashboard(program: Command): void {
       }
 
       child.on("exit", (code) => {
+        removeSignalHandlers();
         if (openAbort) openAbort.abort();
 
         if (code !== 0 && code !== null && !opts.rebuild) {

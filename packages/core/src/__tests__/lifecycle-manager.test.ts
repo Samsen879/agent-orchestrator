@@ -509,6 +509,47 @@ describe("check (single session)", () => {
     expect(lm.getStates().get("app-1")).toBe("stuck");
   });
 
+  it("keeps orchestrator sessions idle instead of promoting them to stuck", async () => {
+    config.reactions = {
+      "agent-stuck": {
+        auto: true,
+        action: "notify",
+        threshold: "1m",
+      },
+    };
+
+    vi.mocked(mockAgent.getActivityState).mockResolvedValue({
+      state: "idle",
+      timestamp: new Date(Date.now() - 120_000),
+    });
+
+    const session = makeSession({
+      id: "app-orchestrator",
+      status: "working",
+      branch: "main",
+      metadata: { role: "orchestrator" },
+    });
+    vi.mocked(mockSessionManager.get).mockResolvedValue(session);
+
+    writeMetadata(sessionsDir, "app-orchestrator", {
+      worktree: "/tmp",
+      branch: "main",
+      status: "working",
+      project: "my-app",
+      role: "orchestrator",
+    });
+
+    const lm = createLifecycleManager({
+      config,
+      registry: mockRegistry,
+      sessionManager: mockSessionManager,
+    });
+
+    await lm.check("app-orchestrator");
+
+    expect(lm.getStates().get("app-orchestrator")).toBe("idle");
+  });
+
   it("uses global agent-stuck threshold when project override omits threshold", async () => {
     config.reactions = {
       "agent-stuck": {
@@ -552,6 +593,78 @@ describe("check (single session)", () => {
     await lm.check("app-1");
 
     expect(lm.getStates().get("app-1")).toBe("stuck");
+  });
+
+  it("keeps passive base-drift PRs out of stuck when no actionable backlog remains", async () => {
+    config.reactions = {
+      "agent-stuck": {
+        auto: true,
+        action: "notify",
+        threshold: "1m",
+      },
+    };
+
+    const mockSCM: SCM = {
+      name: "mock-scm",
+      detectPR: vi.fn(),
+      getPRState: vi.fn().mockResolvedValue("open"),
+      mergePR: vi.fn(),
+      closePR: vi.fn(),
+      getCIChecks: vi.fn(),
+      getCISummary: vi.fn().mockResolvedValue("passing"),
+      getReviews: vi.fn(),
+      getReviewDecision: vi.fn().mockResolvedValue("none"),
+      getPendingComments: vi.fn().mockResolvedValue([]),
+      getAutomatedComments: vi.fn().mockResolvedValue([]),
+      getMergeability: vi.fn().mockResolvedValue({
+        mergeable: false,
+        ciPassing: true,
+        approved: false,
+        noConflicts: true,
+        blockers: ["Branch is behind base branch"],
+      }),
+    };
+
+    const registryWithSCM: PluginRegistry = {
+      ...mockRegistry,
+      get: vi.fn().mockImplementation((slot: string) => {
+        if (slot === "runtime") return mockRuntime;
+        if (slot === "agent") return mockAgent;
+        if (slot === "scm") return mockSCM;
+        return null;
+      }),
+    };
+
+    vi.mocked(mockAgent.getActivityState).mockResolvedValue({
+      state: "idle",
+      timestamp: new Date(Date.now() - 120_000),
+    });
+
+    const session = makeSession({
+      status: "pr_open",
+      pr: makePR(),
+      metadata: { agent: "opencode" },
+    });
+    vi.mocked(mockSessionManager.get).mockResolvedValue(session);
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "feat/test",
+      status: "pr_open",
+      project: "my-app",
+      agent: "opencode",
+      pr: makePR().url,
+    });
+
+    const lm = createLifecycleManager({
+      config,
+      registry: registryWithSCM,
+      sessionManager: mockSessionManager,
+    });
+
+    await lm.check("app-1");
+
+    expect(lm.getStates().get("app-1")).toBe("pr_open");
   });
 
   it("still auto-detects PR before marking idle sessions as stuck", async () => {
@@ -1172,7 +1285,11 @@ describe("reactions", () => {
 
     await lm.check("app-1");
 
-    expect(mockSessionManager.send).toHaveBeenCalledWith("app-1", "CI is failing. Fix it.");
+    expect(mockSessionManager.send).toHaveBeenCalledWith(
+      "app-1",
+      "CI is failing. Fix it.",
+      { requireConfirmation: true },
+    );
   });
 
   it("does not trigger reaction when auto=false", async () => {
@@ -1297,7 +1414,9 @@ describe("reactions", () => {
 
     expect(lm.getStates().get("app-1")).toBe("ci_failed");
     // send-to-agent reaction should have been executed
-    expect(mockSessionManager.send).toHaveBeenCalledWith("app-1", "Fix CI");
+    expect(mockSessionManager.send).toHaveBeenCalledWith("app-1", "Fix CI", {
+      requireConfirmation: true,
+    });
     // Notifier should NOT have been called — the reaction is handling it
     expect(mockNotifier.notify).not.toHaveBeenCalled();
   });
@@ -1353,6 +1472,7 @@ describe("reactions", () => {
     expect(mockSessionManager.send).toHaveBeenCalledWith(
       "app-orchestrator",
       "Continue coordinating the unfinished execution chain without waiting for human input.",
+      { requireConfirmation: true },
     );
   });
 
@@ -1565,10 +1685,12 @@ describe("reactions", () => {
     expect(mockSessionManager.send).toHaveBeenCalledWith(
       "app-orchestrator",
       expect.stringContaining("Session: app-1"),
+      { requireConfirmation: true },
     );
     expect(mockSessionManager.send).toHaveBeenCalledWith(
       "app-orchestrator",
       expect.stringContaining("Trigger: agent-stuck"),
+      { requireConfirmation: true },
     );
   });
 
@@ -1641,6 +1763,7 @@ describe("reactions", () => {
     expect(mockSessionManager.send).toHaveBeenCalledWith(
       "app-orchestrator",
       expect.stringContaining("Trigger: agent-exited"),
+      { requireConfirmation: true },
     );
   });
 
@@ -1723,11 +1846,14 @@ describe("reactions", () => {
 
     await lm.check("app-1");
 
-    expect(mockSessionManager.send).toHaveBeenNthCalledWith(1, "app-1", "Fix CI");
+    expect(mockSessionManager.send).toHaveBeenNthCalledWith(1, "app-1", "Fix CI", {
+      requireConfirmation: true,
+    });
     expect(mockSessionManager.send).toHaveBeenNthCalledWith(
       2,
       "app-orchestrator",
       expect.stringContaining("Trigger: ci-failed"),
+      { requireConfirmation: true },
     );
     expect(mockNotifier.notify).not.toHaveBeenCalled();
   });
@@ -1796,7 +1922,9 @@ describe("reactions", () => {
 
     await lm.check("app-1");
     expect(mockSessionManager.send).toHaveBeenCalledTimes(1);
-    expect(mockSessionManager.send).toHaveBeenCalledWith("app-1", "Handle review comments.");
+    expect(mockSessionManager.send).toHaveBeenCalledWith("app-1", "Handle review comments.", {
+      requireConfirmation: true,
+    });
 
     vi.mocked(mockSessionManager.send).mockClear();
     await lm.check("app-1");
@@ -1872,7 +2000,11 @@ describe("reactions", () => {
     await lm.check("app-1");
 
     expect(mockSessionManager.send).toHaveBeenCalledTimes(1);
-    expect(mockSessionManager.send).toHaveBeenCalledWith("app-1", "Handle requested changes.");
+    expect(mockSessionManager.send).toHaveBeenCalledWith(
+      "app-1",
+      "Handle requested changes.",
+      { requireConfirmation: true },
+    );
   });
 
   it("dispatches automated review comments only once for an unchanged backlog", async () => {
@@ -1942,6 +2074,7 @@ describe("reactions", () => {
     expect(mockSessionManager.send).toHaveBeenCalledWith(
       "app-1",
       "Handle automated review findings.",
+      { requireConfirmation: true },
     );
 
     vi.mocked(mockSessionManager.send).mockClear();
@@ -2031,6 +2164,7 @@ describe("reactions", () => {
     expect(mockSessionManager.send).toHaveBeenCalledWith(
       "app-1",
       "Handle automated review findings.",
+      { requireConfirmation: true },
     );
     expect(mockSCM.mergePR).not.toHaveBeenCalled();
   });

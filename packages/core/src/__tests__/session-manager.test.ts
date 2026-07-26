@@ -1257,6 +1257,17 @@ describe("spawn", () => {
 });
 
 describe("list", () => {
+  it("ignores bootstrap reservation stubs without durable session metadata", async () => {
+    reserveSessionId(sessionsDir, "app-1");
+    updateMetadata(sessionsDir, "app-2", { status: "killed" });
+
+    const sm = createSessionManager({ config, registry: mockRegistry });
+    const sessions = await sm.list("my-app");
+
+    expect(sessions).toHaveLength(0);
+    expect(mockRuntime.isAlive).not.toHaveBeenCalled();
+  });
+
   it("lists sessions from metadata", async () => {
     writeMetadata(sessionsDir, "app-1", {
       worktree: "/tmp/w1",
@@ -2067,6 +2078,36 @@ describe("cleanup", () => {
     expect(result.skipped).toHaveLength(0);
   });
 
+  it("kills terminal-status sessions when their runtime is still alive", async () => {
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "main",
+      status: "merged",
+      project: "my-app",
+      runtimeHandle: JSON.stringify(makeHandle("rt-1")),
+    });
+
+    const sm = createSessionManager({ config, registry: mockRegistry });
+    const result = await sm.cleanup();
+
+    expect(result.killed).toContain("app-1");
+    expect(mockRuntime.isAlive).toHaveBeenCalledWith(makeHandle("rt-1"));
+    expect(mockRuntime.destroy).toHaveBeenCalledWith(makeHandle("rt-1"));
+  });
+
+  it("archives terminal-status session metadata even without a runtime handle", async () => {
+    writeMetadata(sessionsDir, "app-1", {
+      status: "killed",
+      project: "my-app",
+    });
+
+    const sm = createSessionManager({ config, registry: mockRegistry });
+    const result = await sm.cleanup();
+
+    expect(result.killed).toContain("app-1");
+    expect(existsSync(join(sessionsDir, "app-1"))).toBe(false);
+  });
+
   it("deletes mapped OpenCode session during cleanup", async () => {
     const deleteLogPath = join(tmpDir, "opencode-delete.log");
     const mockBin = installMockOpencode("[]", deleteLogPath);
@@ -2625,6 +2666,30 @@ describe("send", () => {
     expect(mockRuntime.sendMessage).toHaveBeenCalled();
   });
 
+  it("rejects strict sends when delivery cannot be confirmed without restoring", async () => {
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "main",
+      status: "working",
+      project: "my-app",
+      runtimeHandle: JSON.stringify(makeHandle("rt-1")),
+    });
+    vi.mocked(mockRuntime.getOutput).mockResolvedValue("steady output");
+    vi.mocked(mockAgent.detectActivity).mockReturnValue("idle");
+
+    const sm = createSessionManager({ config, registry: mockRegistry });
+
+    await expect(
+      sm.send("app-1", "Fix the CI failures", { requireConfirmation: true }),
+    ).rejects.toThrow("Could not confirm delivery to session app-1");
+    expect(mockRuntime.create).not.toHaveBeenCalled();
+    expect(mockRuntime.sendMessage).toHaveBeenCalledTimes(1);
+    expect(mockRuntime.sendMessage).toHaveBeenCalledWith(
+      makeHandle("rt-1"),
+      "Fix the CI failures",
+    );
+  });
+
   it("delivers long codex tmux messages via file indirection to avoid paste corruption", async () => {
     const longMessage = `Line 1\n${"x".repeat(1500)}\nLine 3`;
     const mockCodexAgent: Agent = {
@@ -2668,6 +2733,45 @@ describe("send", () => {
 
     const filePath = match?.[1] as string;
     expect(readFileSync(filePath, "utf-8")).toBe(longMessage);
+  });
+
+  it("treats strict file-backed codex tmux sends as successful once the notice is sent", async () => {
+    const longMessage = `Line 1\n${"x".repeat(1500)}\nLine 3`;
+    const mockCodexAgent: Agent = {
+      ...mockAgent,
+      name: "codex",
+      processName: "codex",
+    };
+    const registryWithCodexTmux: PluginRegistry = {
+      ...mockRegistry,
+      get: vi.fn().mockImplementation((slot: string, name: string) => {
+        if (slot === "runtime" && name === "tmux") return mockRuntime;
+        if (slot === "agent" && name === "codex") return mockCodexAgent;
+        if (slot === "workspace") return mockWorkspace;
+        return null;
+      }),
+    };
+    const tmuxHandle = { id: "rt-1", runtimeName: "tmux", data: {} };
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "main",
+      status: "working",
+      project: "my-app",
+      agent: "codex",
+      runtimeHandle: JSON.stringify(tmuxHandle),
+    });
+    vi.mocked(mockRuntime.getOutput).mockResolvedValue("steady output");
+    vi.mocked(mockAgent.detectActivity).mockReturnValue("idle");
+
+    const sm = createSessionManager({ config, registry: registryWithCodexTmux });
+    await expect(
+      sm.send("app-1", longMessage, { requireConfirmation: true }),
+    ).resolves.toBeUndefined();
+
+    expect(mockRuntime.create).not.toHaveBeenCalled();
+    expect(mockRuntime.sendMessage).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(mockRuntime.sendMessage).mock.calls[0]?.[1]).toContain("AO note:");
   });
 
   it("throws for nonexistent session", async () => {
@@ -4421,6 +4525,7 @@ describe("restore", () => {
       role: "orchestrator",
       runtimeHandle: JSON.stringify(makeHandle("rt-old")),
     });
+    vi.mocked(mockAgent.getActivityState).mockResolvedValue({ state: "exited" });
 
     const sm = createSessionManager({
       config: configWithOrchestratorModel,
@@ -4431,6 +4536,86 @@ describe("restore", () => {
     expect(mockAgent.getLaunchCommand).toHaveBeenCalledWith(
       expect.objectContaining({ model: "orchestrator-model" }),
     );
+  });
+
+  it("does not destroy a live orchestrator when restore sees stale killed metadata", async () => {
+    const wsPath = join(tmpDir, "ws-app-orchestrator-live");
+    mkdirSync(wsPath, { recursive: true });
+
+    writeMetadata(sessionsDir, "app-orchestrator", {
+      worktree: wsPath,
+      branch: "main",
+      status: "killed",
+      project: "my-app",
+      role: "orchestrator",
+      runtimeHandle: JSON.stringify(makeHandle("rt-old")),
+    });
+
+    vi.mocked(mockRuntime.isAlive).mockResolvedValue(true);
+    vi.mocked(mockAgent.getActivityState).mockResolvedValue({ state: "active" });
+
+    const sm = createSessionManager({ config, registry: mockRegistry });
+    const restored = await sm.restore("app-orchestrator");
+
+    expect(restored.status).toBe("working");
+    expect(restored.activity).toBe("active");
+    expect(restored.runtimeHandle).toEqual(makeHandle("rt-old"));
+    expect(mockRuntime.destroy).not.toHaveBeenCalled();
+    expect(mockRuntime.create).not.toHaveBeenCalled();
+    expect(mockAgent.getLaunchCommand).not.toHaveBeenCalled();
+
+    const meta = readMetadataRaw(sessionsDir, "app-orchestrator");
+    expect(meta?.["status"]).toBe("working");
+    expect(meta?.["runtimeHandle"]).toBe(JSON.stringify(makeHandle("rt-old")));
+  });
+
+  it("passes an orchestrator prompt file when fallback restore launches an orchestrator", async () => {
+    const wsPath = join(tmpDir, "ws-app-orchestrator-fallback-restore");
+    mkdirSync(wsPath, { recursive: true });
+
+    const mockAgentWithNullRestore: Agent = {
+      ...mockAgent,
+      getActivityState: vi.fn().mockResolvedValue({ state: "exited" }),
+      getRestoreCommand: vi.fn().mockResolvedValue(null),
+    };
+
+    const registryWithNullRestore: PluginRegistry = {
+      ...mockRegistry,
+      get: vi.fn().mockImplementation((slot: string) => {
+        if (slot === "runtime") return mockRuntime;
+        if (slot === "agent") return mockAgentWithNullRestore;
+        if (slot === "workspace") return mockWorkspace;
+        return null;
+      }),
+    };
+
+    writeMetadata(sessionsDir, "app-orchestrator", {
+      worktree: wsPath,
+      branch: "main",
+      status: "killed",
+      project: "my-app",
+      role: "orchestrator",
+      runtimeHandle: JSON.stringify(makeHandle("rt-old")),
+    });
+
+    const sm = createSessionManager({ config, registry: registryWithNullRestore });
+    await sm.restore("app-orchestrator");
+
+    expect(mockAgentWithNullRestore.getRestoreCommand).toHaveBeenCalled();
+    expect(mockAgent.getLaunchCommand).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: "app-orchestrator",
+        permissions: "permissionless",
+        systemPromptFile: expect.stringContaining("orchestrator-prompt.md"),
+      }),
+    );
+    const callArgs = vi.mocked(mockAgent.getLaunchCommand).mock.calls[0][0];
+    expect(callArgs.projectConfig.agentConfig?.permissions).toBe("permissionless");
+    expect(callArgs.systemPromptFile).toBeDefined();
+    expect(existsSync(callArgs.systemPromptFile!)).toBe(true);
+    const prompt = readFileSync(callArgs.systemPromptFile!, "utf-8");
+    expect(prompt).toContain("orchestrator agent");
+    expect(prompt).toContain("My App");
   });
 
   it("forwards configured subagent when restoring sessions", async () => {

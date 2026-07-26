@@ -34,6 +34,7 @@ import {
   type ActivityState,
   type EventPriority,
   type ProjectConfig,
+  type MergeReadiness,
   isOrchestratorSession,
 } from "./types.js";
 import { updateMetadata } from "./metadata.js";
@@ -80,6 +81,23 @@ function inferPriority(type: EventType): EventPriority {
   }
   return "info";
 }
+
+function getPRDetectionSession(session: Session): Session {
+  const taskBranch = session.metadata["taskBranch"]?.trim();
+  if (!taskBranch || taskBranch === session.branch) {
+    return session;
+  }
+
+  return {
+    ...session,
+    branch: taskBranch,
+  };
+}
+
+const PASSIVE_MERGE_BLOCKERS = new Set([
+  "Branch is behind base branch",
+  "Merge is blocked by branch protection",
+]);
 
 /** Create an OrchestratorEvent with defaults filled in. */
 function createEvent(
@@ -209,6 +227,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
 
   /** Check if idle time exceeds the agent-stuck threshold. */
   function isIdleBeyondThreshold(session: Session, idleTimestamp: Date): boolean {
+    if (isOrchestratorSession(session)) return false;
     const stuckReaction = getReactionConfigForSession(session, "agent-stuck");
     const thresholdStr = stuckReaction?.threshold;
     if (typeof thresholdStr !== "string") return false;
@@ -216,6 +235,13 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     if (stuckThresholdMs <= 0) return false;
     const idleMs = Date.now() - idleTimestamp.getTime();
     return idleMs > stuckThresholdMs;
+  }
+
+  function hasOnlyPassiveMergeBlockers(mergeReady: MergeReadiness): boolean {
+    return (
+      mergeReady.blockers.length > 0 &&
+      mergeReady.blockers.every((blocker) => PASSIVE_MERGE_BLOCKERS.has(blocker))
+    );
   }
 
   function parseRepeatInterval(value: number | string | undefined): number {
@@ -346,16 +372,17 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     //    OpenCode) that can't reliably write pr=<url> to metadata on their own.
     //    Skip orchestrator sessions — they sit on the base branch (e.g. master)
     //    and should never own a PR.
+    const prDetectionSession = getPRDetectionSession(session);
     if (
       !session.pr &&
       scm &&
-      session.branch &&
+      prDetectionSession.branch &&
       session.metadata["prAutoDetect"] !== "off" &&
       session.metadata["role"] !== "orchestrator" &&
       !session.id.endsWith("-orchestrator")
     ) {
       try {
-        const detectedPR = await scm.detectPR(session, project);
+        const detectedPR = await scm.detectPR(prDetectionSession, project);
         if (detectedPR) {
           session.pr = detectedPR;
           // Persist PR URL so subsequent polls don't need to re-query.
@@ -388,11 +415,19 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
           // the same as "approved" so CI-green PRs reach "mergeable" status
           // and fire the merge.ready event / approved-and-green reaction.
           const mergeReady = await scm.getMergeability(session.pr);
+          const passiveMergeBlockers = hasOnlyPassiveMergeBlockers(mergeReady);
+          const automatedComments =
+            mergeReady.mergeable || passiveMergeBlockers
+              ? await scm.getAutomatedComments(session.pr)
+              : null;
+
           if (mergeReady.mergeable) {
             // Automated review backlog is a merge blocker for lifecycle-driven
             // automation even when GitHub reports the PR as mergeable.
-            const automatedComments = await scm.getAutomatedComments(session.pr);
-            if (automatedComments.length === 0) return "mergeable";
+            if ((automatedComments?.length ?? 0) === 0) return "mergeable";
+          }
+          if (passiveMergeBlockers && (automatedComments?.length ?? 0) === 0) {
+            return reviewDecision === "approved" ? "approved" : "pr_open";
           }
           if (reviewDecision === "approved") return "approved";
         }
@@ -528,7 +563,9 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
       case "send-to-agent": {
         if (reactionConfig.message) {
           try {
-            await sessionManager.send(sessionId, reactionConfig.message);
+            await sessionManager.send(sessionId, reactionConfig.message, {
+              requireConfirmation: true,
+            });
 
             return {
               reactionType: reactionKey,
@@ -801,7 +838,9 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
         escalationReason: opts.escalationReason,
       });
 
-      await sessionManager.send(orchestrator.id, message);
+      await sessionManager.send(orchestrator.id, message, {
+        requireConfirmation: true,
+      });
       return {
         reactionType: opts.reactionKey,
         success: true,

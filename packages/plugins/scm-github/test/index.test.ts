@@ -927,114 +927,147 @@ describe("scm-github plugin", () => {
   // ---- getAutomatedComments ----------------------------------------------
 
   describe("getAutomatedComments", () => {
-    it("uses explicit GET query for pulls comments and paginates", async () => {
-      const page1 = Array.from({ length: 100 }, (_, i) => ({
-        id: i + 1,
-        user: { login: "cursor[bot]" },
-        body: "Potential issue detected",
-        path: "a.ts",
-        line: i + 1,
-        original_line: null,
-        created_at: "2025-01-01T00:00:00Z",
-        html_url: `u${i + 1}`,
-      }));
-
-      const page2 = [
-        {
-          id: 101,
-          user: { login: "cursor[bot]" },
-          body: "Warning: check this",
-          path: "b.ts",
-          line: 7,
-          original_line: null,
-          created_at: "2025-01-01T00:00:00Z",
-          html_url: "u101",
+    function makeGraphQLThreads(
+      threads: Array<{
+        isResolved: boolean;
+        isOutdated?: boolean;
+        id: string;
+        author: string | null;
+        body: string;
+        path: string | null;
+        line: number | null;
+        originalLine?: number | null;
+        url: string;
+        createdAt: string;
+      }>,
+    ) {
+      return {
+        data: {
+          repository: {
+            pullRequest: {
+              reviewThreads: {
+                nodes: threads.map((t) => ({
+                  isResolved: t.isResolved,
+                  isOutdated: t.isOutdated ?? false,
+                  comments: {
+                    nodes: [
+                      {
+                        id: t.id,
+                        author: t.author ? { login: t.author } : null,
+                        body: t.body,
+                        path: t.path,
+                        line: t.line,
+                        originalLine: t.originalLine ?? null,
+                        url: t.url,
+                        createdAt: t.createdAt,
+                      },
+                    ],
+                  },
+                })),
+              },
+            },
+          },
         },
-      ];
+      };
+    }
 
-      mockGh(page1);
-      mockGh(page2);
+    it("returns only unresolved non-outdated bot review threads", async () => {
+      mockGh(
+        makeGraphQLThreads([
+          {
+            isResolved: false,
+            id: "BOT-1",
+            author: "chatgpt-codex-connector",
+            body: "Found a potential issue",
+            path: "a.ts",
+            line: 5,
+            url: "u1",
+            createdAt: "2025-01-01T00:00:00Z",
+          },
+          {
+            isResolved: true,
+            id: "BOT-2",
+            author: "cursor[bot]",
+            body: "Resolved already",
+            path: "b.ts",
+            line: 8,
+            url: "u2",
+            createdAt: "2025-01-01T00:00:00Z",
+          },
+          {
+            isResolved: false,
+            isOutdated: true,
+            id: "BOT-3",
+            author: "github-actions[bot]",
+            body: "Outdated warning",
+            path: "c.ts",
+            line: 11,
+            url: "u3",
+            createdAt: "2025-01-01T00:00:00Z",
+          },
+          {
+            isResolved: false,
+            id: "HUMAN-1",
+            author: "alice",
+            body: "Human comment",
+            path: "d.ts",
+            line: 3,
+            url: "u4",
+            createdAt: "2025-01-01T00:00:00Z",
+          },
+        ]),
+      );
 
       const comments = await scm.getAutomatedComments(pr);
 
-      expect(comments).toHaveLength(101);
-      expect(ghMock).toHaveBeenNthCalledWith(
-        1,
-        "gh",
-        ["api", "--method", "GET", "repos/acme/repo/pulls/42/comments?per_page=100&page=1"],
-        expect.any(Object),
-      );
-      expect(ghMock).toHaveBeenNthCalledWith(
-        2,
-        "gh",
-        ["api", "--method", "GET", "repos/acme/repo/pulls/42/comments?per_page=100&page=2"],
-        expect.any(Object),
-      );
-    });
-
-    it("returns bot comments filtered from all PR comments", async () => {
-      mockGh([
-        {
-          id: 1,
-          user: { login: "chatgpt-codex-connector" },
-          body: "Found a potential issue",
-          path: "a.ts",
-          line: 5,
-          original_line: null,
-          created_at: "2025-01-01T00:00:00Z",
-          html_url: "u1",
-        },
-        {
-          id: 2,
-          user: { login: "alice" },
-          body: "Human comment",
-          path: "a.ts",
-          line: 1,
-          original_line: null,
-          created_at: "2025-01-01T00:00:00Z",
-          html_url: "u2",
-        },
-      ]);
-
-      const comments = await scm.getAutomatedComments(pr);
       expect(comments).toHaveLength(1);
-      expect(comments[0].botName).toBe("chatgpt-codex-connector");
-      expect(comments[0].severity).toBe("error"); // "potential issue" → error
+      expect(comments[0]).toMatchObject({
+        id: "BOT-1",
+        botName: "chatgpt-codex-connector",
+        severity: "error",
+      });
+      expect(ghMock).toHaveBeenCalledWith(
+        "gh",
+        expect.arrayContaining(["api", "graphql"]),
+        expect.any(Object),
+      );
     });
 
     it("classifies severity from body content", async () => {
-      mockGh([
-        {
-          id: 1,
-          user: { login: "github-actions[bot]" },
+      mockGh(
+        makeGraphQLThreads([
+          {
+            isResolved: false,
+            id: "BOT-1",
+            author: "github-actions[bot]",
           body: "Error: build failed",
           path: "a.ts",
           line: 1,
-          original_line: null,
-          created_at: "2025-01-01T00:00:00Z",
-          html_url: "u",
-        },
-        {
-          id: 2,
-          user: { login: "github-actions[bot]" },
+            url: "u1",
+            createdAt: "2025-01-01T00:00:00Z",
+          },
+          {
+            isResolved: false,
+            id: "BOT-2",
+            author: "github-actions[bot]",
           body: "Warning: deprecated API",
           path: "a.ts",
           line: 2,
-          original_line: null,
-          created_at: "2025-01-01T00:00:00Z",
-          html_url: "u",
-        },
-        {
-          id: 3,
-          user: { login: "github-actions[bot]" },
+            url: "u2",
+            createdAt: "2025-01-01T00:00:00Z",
+          },
+          {
+            isResolved: false,
+            id: "BOT-3",
+            author: "github-actions[bot]",
           body: "Deployed to staging",
           path: "a.ts",
           line: 3,
-          original_line: null,
-          created_at: "2025-01-01T00:00:00Z",
-          html_url: "u",
-        },
-      ]);
+            url: "u3",
+            createdAt: "2025-01-01T00:00:00Z",
+          },
+        ]),
+      );
 
       const comments = await scm.getAutomatedComments(pr);
       expect(comments).toHaveLength(3);
@@ -1043,19 +1076,31 @@ describe("scm-github plugin", () => {
       expect(comments[2].severity).toBe("info");
     });
 
-    it("returns empty when no bot comments", async () => {
-      mockGh([
-        {
-          id: 1,
-          user: { login: "alice" },
+    it("returns empty when no actionable bot comments remain", async () => {
+      mockGh(
+        makeGraphQLThreads([
+          {
+            isResolved: false,
+            id: "HUMAN-1",
+            author: "alice",
           body: "Human comment",
           path: "a.ts",
           line: 1,
-          original_line: null,
-          created_at: "2025-01-01T00:00:00Z",
-          html_url: "u",
-        },
-      ]);
+            url: "u1",
+            createdAt: "2025-01-01T00:00:00Z",
+          },
+          {
+            isResolved: true,
+            id: "BOT-1",
+            author: "dependabot[bot]",
+            body: "Already resolved",
+            path: "a.ts",
+            line: 2,
+            url: "u2",
+            createdAt: "2025-01-01T00:00:00Z",
+          },
+        ]),
+      );
 
       const comments = await scm.getAutomatedComments(pr);
       expect(comments).toEqual([]);
@@ -1068,19 +1113,22 @@ describe("scm-github plugin", () => {
       );
     });
 
-    it("uses original_line as fallback", async () => {
-      mockGh([
-        {
-          id: 1,
-          user: { login: "dependabot[bot]" },
+    it("uses originalLine as fallback", async () => {
+      mockGh(
+        makeGraphQLThreads([
+          {
+            isResolved: false,
+            id: "BOT-1",
+            author: "dependabot[bot]",
           body: "Suggest update",
           path: "a.ts",
           line: null,
-          original_line: 15,
-          created_at: "2025-01-01T00:00:00Z",
-          html_url: "u",
-        },
-      ]);
+            originalLine: 15,
+            url: "u1",
+            createdAt: "2025-01-01T00:00:00Z",
+          },
+        ]),
+      );
 
       const comments = await scm.getAutomatedComments(pr);
       expect(comments[0].line).toBe(15);

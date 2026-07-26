@@ -21,6 +21,7 @@ import {
   isIssueNotFoundError,
   isRestorable,
   NON_RESTORABLE_STATUSES,
+  MessageDeliveryUnconfirmedError,
   SessionNotFoundError,
   SessionNotRestorableError,
   WorkspaceMissingError,
@@ -42,6 +43,7 @@ import {
   type PluginRegistry,
   type RuntimeHandle,
   type Issue,
+  type SendOptions,
   isOrchestratorSession,
   PR_STATE,
 } from "./types.js";
@@ -56,6 +58,7 @@ import {
   reserveSessionId,
 } from "./metadata.js";
 import { buildPrompt } from "./prompt-builder.js";
+import { generateOrchestratorPrompt } from "./orchestrator-prompt.js";
 import {
   getSessionsDir,
   getWorktreesDir,
@@ -411,6 +414,23 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
     return raw["role"] === "orchestrator" || sessionId.endsWith("-orchestrator");
   }
 
+  function hasDurableSessionMetadata(raw: Record<string, string>): boolean {
+    return [
+      "worktree",
+      "branch",
+      "tmuxName",
+      "runtimeHandle",
+      "issue",
+      "pr",
+      "project",
+      "agent",
+      "role",
+      "createdAt",
+      "restoredAt",
+      "opencodeSessionId",
+    ].some((key) => raw[key]?.trim());
+  }
+
   function isCleanupProtectedSession(
     project: ProjectConfig,
     sessionId: string,
@@ -568,6 +588,7 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
     const records = listMetadata(sessionsDir).flatMap((sessionName) => {
       const raw = readMetadataRaw(sessionsDir, sessionName);
       if (!raw) return [];
+      if (!hasDurableSessionMetadata(raw)) return [];
 
       let modifiedAt: Date | undefined;
       try {
@@ -1736,8 +1757,19 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
         const plugins = resolvePlugins(project);
         let shouldKill = false;
 
+        if (TERMINAL_SESSION_STATUSES.has(session.status)) {
+          if (session.runtimeHandle && plugins.runtime) {
+            try {
+              await plugins.runtime.isAlive(session.runtimeHandle);
+            } catch {
+              // Runtime might already be gone; terminal metadata is still cleanup-ready.
+            }
+          }
+          shouldKill = true;
+        }
+
         // Check if PR is merged
-        if (session.pr && plugins.scm) {
+        if (!shouldKill && session.pr && plugins.scm) {
           try {
             const prState = await plugins.scm.getPRState(session.pr);
             if (prState === PR_STATE.MERGED || prState === PR_STATE.CLOSED) {
@@ -1843,7 +1875,11 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
     return result;
   }
 
-  async function send(sessionId: SessionId, message: string): Promise<void> {
+  async function send(
+    sessionId: SessionId,
+    message: string,
+    options?: SendOptions,
+  ): Promise<void> {
     const { raw, sessionsDir, project } = requireSessionRecord(sessionId);
     const pause = getProjectPause(project);
     const orchestratorId = `${project.sessionPrefix}-orchestrator`;
@@ -2067,7 +2103,12 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
         throw new Error(`Session ${sessionId} has no runtime handle`);
       }
 
-      const deliveryMessage = shouldUseFileBackedCodexSend(agentName, handle.runtimeName, message)
+      const useFileBackedDelivery = shouldUseFileBackedCodexSend(
+        agentName,
+        handle.runtimeName,
+        message,
+      );
+      const deliveryMessage = useFileBackedDelivery
         ? buildFileBackedCodexNotice(
             writeInteractiveDeliveryFile(config.configPath, project.path, sessionId, message),
           )
@@ -2078,6 +2119,10 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
       const baselineUpdatedAt = await getOpenCodeSessionUpdatedAt();
 
       await runtimePlugin.sendMessage(handle, deliveryMessage);
+
+      if (useFileBackedDelivery) {
+        return;
+      }
 
       for (let attempt = 1; attempt <= SEND_CONFIRMATION_ATTEMPTS; attempt++) {
         // Sleep before each check (including the first) so the runtime has time
@@ -2101,6 +2146,10 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
         }
       }
 
+      if (options?.requireConfirmation) {
+        throw new MessageDeliveryUnconfirmedError(sessionId);
+      }
+
       // Message was already sent via runtimePlugin.sendMessage above — if we
       // cannot *confirm* delivery (e.g. agent is slow to show output), treat it
       // as a soft success rather than throwing.  Throwing here caused the caller
@@ -2114,6 +2163,9 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
     try {
       await sendWithConfirmation(prepared);
     } catch (err) {
+      if (err instanceof MessageDeliveryUnconfirmedError) {
+        throw err;
+      }
       const shouldRetryWithRestore =
         prepared.restoredAt === undefined && !NON_RESTORABLE_STATUSES.has(prepared.status);
 
@@ -2128,6 +2180,9 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
       try {
         await sendWithConfirmation(prepared);
       } catch (retryErr) {
+        if (retryErr instanceof MessageDeliveryUnconfirmedError) {
+          throw retryErr;
+        }
         if (retryErr instanceof Error) {
           throw retryErr;
         }
@@ -2299,6 +2354,7 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
 
     const selection = resolveSelectionForSession(project, sessionId, raw);
     const selectedAgent = selection.agentName;
+    const sessionIsOrchestrator = isOrchestratorSessionRecord(sessionId, raw);
     if (selectedAgent === "opencode" && !asValidOpenCodeSessionId(raw["opencodeSessionId"])) {
       const discovered = await discoverOpenCodeSessionIdByTitle(
         sessionId,
@@ -2319,6 +2375,40 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
     //    and isRestorable would reject it.
     const session = metadataToSession(sessionId, raw, projectId);
     const plugins = resolvePlugins(project, selection.agentName);
+
+    if (
+      sessionIsOrchestrator &&
+      session.status === "killed" &&
+      session.runtimeHandle &&
+      plugins.runtime
+    ) {
+      const runtimeAlive = await plugins.runtime.isAlive(session.runtimeHandle).catch(() => false);
+      if (runtimeAlive) {
+        let activity = session.activity;
+        if (plugins.agent) {
+          try {
+            activity =
+              (await plugins.agent.getActivityState(session, config.readyThresholdMs))?.state ??
+              activity;
+          } catch {
+            activity = null;
+          }
+        }
+
+        if (activity !== "exited") {
+          const status = activity === "waiting_input" ? "needs_input" : "working";
+          if (!fromArchive) {
+            updateMetadata(sessionsDir, sessionId, { status });
+          }
+          return {
+            ...session,
+            status,
+            activity,
+          };
+        }
+      }
+    }
+
     await enrichSessionWithRuntimeState(session, plugins, true);
 
     // 3. Validate restorability
@@ -2405,6 +2495,18 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
 
     // 7. Get launch command — try restore command first, fall back to fresh launch
     let launchCommand: string;
+    let systemPromptFile: string | undefined;
+    if (sessionIsOrchestrator) {
+      const baseDir = getProjectBaseDir(config.configPath, project.path);
+      mkdirSync(baseDir, { recursive: true });
+      systemPromptFile = join(baseDir, "orchestrator-prompt.md");
+      writeFileSync(
+        systemPromptFile,
+        generateOrchestratorPrompt({ config, projectId, project }),
+        "utf-8",
+      );
+    }
+
     const agentLaunchConfig = {
       sessionId,
       projectConfig: {
@@ -2421,6 +2523,7 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
       permissions: selection.role === "orchestrator" ? "permissionless" : selection.permissions,
       model: selection.model,
       subagent: selection.subagent,
+      systemPromptFile,
     };
 
     if (plugins.agent.getRestoreCommand) {

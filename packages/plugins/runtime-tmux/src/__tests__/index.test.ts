@@ -301,6 +301,40 @@ describe("runtime.sendMessage()", () => {
     );
   });
 
+  it("retries Enter when Codex still shows the message sitting in the prompt", async () => {
+    const runtime = create();
+    const handle = makeHandle("msg-codex-prompt");
+    const note = "AO note: Read /tmp/ao-note.md and continue from that file.";
+
+    mockTmuxSuccess(); // C-u
+    mockTmuxSuccess(); // send-keys -l
+    mockTmuxSuccess(); // first Enter
+    mockTmuxSuccess(`› ${note}`); // capture-pane still shows unsent prompt
+    mockTmuxSuccess(); // second Enter
+    mockTmuxSuccess(""); // capture-pane no longer shows prompt draft
+
+    await runtime.sendMessage(handle, note);
+
+    expect(mockExecFileCustom).toHaveBeenNthCalledWith(
+      4,
+      "tmux",
+      ["capture-pane", "-t", "msg-codex-prompt", "-p", "-S", "-20"],
+      expectedTmuxOptions,
+    );
+    expect(mockExecFileCustom).toHaveBeenNthCalledWith(
+      5,
+      "tmux",
+      ["send-keys", "-t", "msg-codex-prompt", "Enter"],
+      expectedTmuxOptions,
+    );
+    expect(mockExecFileCustom).toHaveBeenNthCalledWith(
+      6,
+      "tmux",
+      ["capture-pane", "-t", "msg-codex-prompt", "-p", "-S", "-20"],
+      expectedTmuxOptions,
+    );
+  });
+
   it("uses load-buffer + paste-buffer for long text (> 200 chars)", async () => {
     const runtime = create();
     const handle = makeHandle("msg-long");

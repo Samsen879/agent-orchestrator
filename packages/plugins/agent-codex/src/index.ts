@@ -370,6 +370,22 @@ interface CodexJsonlLine {
   model?: string;
   // Thread ID from thread_started notifications
   threadId?: string;
+  payload?: {
+    cwd?: string;
+    model?: string;
+    threadId?: string;
+    type?: string;
+    info?: {
+      total_token_usage?: {
+        input_tokens?: number;
+        output_tokens?: number;
+      };
+      last_token_usage?: {
+        input_tokens?: number;
+        output_tokens?: number;
+      };
+    };
+  };
   // User message content (from user input events)
   content?: string;
   role?: string;
@@ -383,6 +399,65 @@ interface CodexJsonlLine {
   };
 }
 
+function getPayloadObject(entry: CodexJsonlLine): NonNullable<CodexJsonlLine["payload"]> | null {
+  return entry.payload && typeof entry.payload === "object" ? entry.payload : null;
+}
+
+function getSessionWorkspaceCandidates(session: Session): string[] {
+  const candidates = new Set<string>();
+  if (typeof session.workspacePath === "string" && session.workspacePath) {
+    candidates.add(session.workspacePath);
+  }
+
+  const handleWorkspacePath = session.runtimeHandle?.data?.["workspacePath"];
+  if (typeof handleWorkspacePath === "string" && handleWorkspacePath) {
+    candidates.add(handleWorkspacePath);
+  }
+
+  return [...candidates];
+}
+
+function getEntryWorkspacePath(entry: CodexJsonlLine): string | null {
+  if (typeof entry.cwd === "string" && entry.cwd) return entry.cwd;
+  const payload = getPayloadObject(entry);
+  if (payload && typeof payload.cwd === "string" && payload.cwd) return payload.cwd;
+  return null;
+}
+
+function getEntryModel(entry: CodexJsonlLine): string | null {
+  if (typeof entry.model === "string" && entry.model) return entry.model;
+  const payload = getPayloadObject(entry);
+  if (payload && typeof payload.model === "string" && payload.model) return payload.model;
+  return null;
+}
+
+function getEntryThreadId(entry: CodexJsonlLine): string | null {
+  if (typeof entry.threadId === "string" && entry.threadId) return entry.threadId;
+  const payload = getPayloadObject(entry);
+  if (payload && typeof payload.threadId === "string" && payload.threadId) return payload.threadId;
+  return null;
+}
+
+function getTokenCountUsage(entry: CodexJsonlLine): { inputTokens: number; outputTokens: number } | null {
+  if (entry.msg?.type === "token_count") {
+    return {
+      inputTokens: entry.msg.input_tokens ?? 0,
+      outputTokens: entry.msg.output_tokens ?? 0,
+    };
+  }
+
+  const payload = getPayloadObject(entry);
+  if (entry.type !== "event_msg" || payload?.type !== "token_count") return null;
+
+  const usage = payload.info?.last_token_usage ?? payload.info?.total_token_usage;
+  if (!usage) return null;
+
+  return {
+    inputTokens: usage.input_tokens ?? 0,
+    outputTokens: usage.output_tokens ?? 0,
+  };
+}
+
 /**
  * Collect all JSONL files under a directory, recursively.
  * Codex stores sessions in date-sharded directories:
@@ -393,6 +468,9 @@ interface CodexJsonlLine {
  * (YYYY/MM/DD + 1 buffer) as an additional safety guard.
  */
 const MAX_SESSION_SCAN_DEPTH = 4;
+const SESSION_META_SCAN_CHUNK_BYTES = 4096;
+const SESSION_META_SCAN_MAX_BYTES = 256 * 1024;
+const SESSION_META_SCAN_MAX_LINES = 10;
 
 async function collectJsonlFiles(dir: string, depth = 0): Promise<string[]> {
   if (depth > MAX_SESSION_SCAN_DEPTH) return [];
@@ -436,18 +514,25 @@ async function sessionFileMatchesCwd(
   workspacePath: string,
 ): Promise<boolean> {
   try {
-    // Read only the first 4 KB — session_meta is always in the first few lines.
-    // Avoids loading large rollout files (100 MB+) into memory.
     const handle = await open(filePath, "r");
-    let content: string;
+    let content = "";
     try {
-      const buffer = Buffer.allocUnsafe(4096);
-      const { bytesRead } = await handle.read(buffer, 0, 4096, 0);
-      content = buffer.subarray(0, bytesRead).toString("utf-8");
+      let position = 0;
+      while (content.split("\n").length <= SESSION_META_SCAN_MAX_LINES && position < SESSION_META_SCAN_MAX_BYTES) {
+        const remaining = SESSION_META_SCAN_MAX_BYTES - position;
+        const chunkSize = Math.min(SESSION_META_SCAN_CHUNK_BYTES, remaining);
+        const buffer = Buffer.allocUnsafe(chunkSize);
+        const { bytesRead } = await handle.read(buffer, 0, chunkSize, position);
+        if (bytesRead <= 0) {
+          break;
+        }
+        content += buffer.subarray(0, bytesRead).toString("utf-8");
+        position += bytesRead;
+      }
     } finally {
       await handle.close();
     }
-    const lines = content.split("\n").slice(0, 10);
+    const lines = content.split("\n").slice(0, SESSION_META_SCAN_MAX_LINES);
     for (const line of lines) {
       const trimmed = line.trim();
       if (!trimmed) continue;
@@ -458,7 +543,7 @@ async function sessionFileMatchesCwd(
           parsed !== null &&
           !Array.isArray(parsed) &&
           (parsed as CodexJsonlLine).type === "session_meta" &&
-          (parsed as CodexJsonlLine).cwd === workspacePath
+          getEntryWorkspacePath(parsed as CodexJsonlLine) === workspacePath
         ) {
           return true;
         }
@@ -481,23 +566,28 @@ async function findCodexSessionFile(workspacePath: string): Promise<string | nul
   const jsonlFiles = await collectJsonlFiles(CODEX_SESSIONS_DIR);
   if (jsonlFiles.length === 0) return null;
 
-  let bestMatch: { path: string; mtime: number } | null = null;
-
-  for (const filePath of jsonlFiles) {
-    const matches = await sessionFileMatchesCwd(filePath, workspacePath);
-    if (matches) {
-      try {
-        const s = await stat(filePath);
-        if (!bestMatch || s.mtimeMs > bestMatch.mtime) {
-          bestMatch = { path: filePath, mtime: s.mtimeMs };
+  const rankedFiles = (
+    await Promise.all(
+      jsonlFiles.map(async (filePath) => {
+        try {
+          const s = await stat(filePath);
+          return { path: filePath, mtime: s.mtimeMs };
+        } catch {
+          return null;
         }
-      } catch {
-        // Skip if stat fails
-      }
+      }),
+    )
+  )
+    .filter((entry): entry is { path: string; mtime: number } => entry !== null)
+    .sort((a, b) => b.mtime - a.mtime);
+
+  for (const { path: filePath } of rankedFiles) {
+    if (await sessionFileMatchesCwd(filePath, workspacePath)) {
+      return filePath;
     }
   }
 
-  return bestMatch?.path ?? null;
+  return null;
 }
 
 /** Aggregated data extracted from a Codex session file via streaming */
@@ -529,15 +619,20 @@ async function streamCodexSessionData(filePath: string): Promise<CodexSessionDat
         if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) continue;
         const entry = parsed as CodexJsonlLine;
 
-        if (entry.type === "session_meta" && typeof entry.model === "string") {
-          data.model = entry.model;
+        if (entry.type === "session_meta") {
+          const model = getEntryModel(entry);
+          if (model) {
+            data.model = model;
+          }
         }
-        if (typeof entry.threadId === "string" && entry.threadId) {
-          data.threadId = entry.threadId;
+        const threadId = getEntryThreadId(entry);
+        if (threadId) {
+          data.threadId = threadId;
         }
-        if (entry.type === "event_msg" && entry.msg?.type === "token_count") {
-          data.inputTokens += entry.msg.input_tokens ?? 0;
-          data.outputTokens += entry.msg.output_tokens ?? 0;
+        const usage = getTokenCountUsage(entry);
+        if (usage) {
+          data.inputTokens += usage.inputTokens;
+          data.outputTokens += usage.outputTokens;
         }
       } catch {
         // Skip malformed lines
@@ -663,8 +758,9 @@ function createCodexAgent(): Agent {
       appendModelFlags(parts, config.model);
 
       if (config.systemPromptFile) {
-        // Codex reads developer instructions from a file via config override
-        parts.push("-c", `model_instructions_file=${shellEscape(config.systemPromptFile)}`);
+        // Current Codex CLI applies developer_instructions, but ignores the
+        // older file-based override for prompt injection.
+        parts.push("-c", `developer_instructions="$(cat ${shellEscape(config.systemPromptFile)})"`);
       } else if (config.systemPrompt) {
         // Codex accepts inline developer instructions via config override
         parts.push("-c", `developer_instructions=${shellEscape(config.systemPrompt)}`);
@@ -736,27 +832,31 @@ function createCodexAgent(): Agent {
 
       // Use session file mtime as a proxy for activity. Codex continuously
       // appends to its rollout JSONL file while working, so a recently
-      // modified file means the agent is active.
-      if (!session.workspacePath) return null;
+      // modified file means the agent is active. When metadata worktree drifts
+      // from the actual tmux runtime workspace, fall back to the workspace path
+      // captured inside runtimeHandle.data.
+      for (const workspacePath of getSessionWorkspaceCandidates(session)) {
+        const sessionFile = await findCodexSessionFileCached(workspacePath);
+        if (!sessionFile) continue;
 
-      const sessionFile = await findCodexSessionFileCached(session.workspacePath);
-      if (!sessionFile) return null;
+        try {
+          const s = await stat(sessionFile);
+          const timestamp = s.mtime;
+          const ageMs = Date.now() - s.mtimeMs;
 
-      try {
-        const s = await stat(sessionFile);
-        const timestamp = s.mtime;
-        const ageMs = Date.now() - s.mtimeMs;
+          if (ageMs <= threshold) {
+            // File was recently modified — agent is actively working
+            return { state: "active", timestamp };
+          }
 
-        if (ageMs <= threshold) {
-          // File was recently modified — agent is actively working
-          return { state: "active", timestamp };
+          // File is stale — agent finished or is idle
+          return { state: "idle", timestamp };
+        } catch {
+          continue;
         }
-
-        // File is stale — agent finished or is idle
-        return { state: "idle", timestamp };
-      } catch {
-        return null;
       }
+
+      return null;
     },
 
     async isProcessRunning(handle: RuntimeHandle): Promise<boolean> {
@@ -816,46 +916,49 @@ function createCodexAgent(): Agent {
     },
 
     async getSessionInfo(session: Session): Promise<AgentSessionInfo | null> {
-      if (!session.workspacePath) return null;
+      for (const workspacePath of getSessionWorkspaceCandidates(session)) {
+        const sessionFile = await findCodexSessionFileCached(workspacePath);
+        if (!sessionFile) continue;
 
-      const sessionFile = await findCodexSessionFileCached(session.workspacePath);
-      if (!sessionFile) return null;
+        // Stream the file line-by-line to avoid loading potentially huge
+        // rollout files (100 MB+) entirely into memory.
+        const data = await streamCodexSessionData(sessionFile);
+        if (!data) continue;
 
-      // Stream the file line-by-line to avoid loading potentially huge
-      // rollout files (100 MB+) entirely into memory.
-      const data = await streamCodexSessionData(sessionFile);
-      if (!data) return null;
+        const agentSessionId = basename(sessionFile, ".jsonl");
 
-      const agentSessionId = basename(sessionFile, ".jsonl");
+        const cost: CostEstimate | undefined =
+          data.inputTokens === 0 && data.outputTokens === 0
+            ? undefined
+            : {
+                inputTokens: data.inputTokens,
+                outputTokens: data.outputTokens,
+                estimatedCostUsd:
+                  (data.inputTokens / 1_000_000) * 2.5 + (data.outputTokens / 1_000_000) * 10.0,
+              };
 
-      const cost: CostEstimate | undefined =
-        data.inputTokens === 0 && data.outputTokens === 0
-          ? undefined
-          : {
-              inputTokens: data.inputTokens,
-              outputTokens: data.outputTokens,
-              estimatedCostUsd:
-                (data.inputTokens / 1_000_000) * 2.5 + (data.outputTokens / 1_000_000) * 10.0,
-            };
+        return {
+          summary: data.model ? `Codex session (${data.model})` : null,
+          summaryIsFallback: true,
+          agentSessionId,
+          cost,
+        };
+      }
 
-      return {
-        summary: data.model ? `Codex session (${data.model})` : null,
-        summaryIsFallback: true,
-        agentSessionId,
-        cost,
-      };
+      return null;
     },
 
     async getRestoreCommand(session: Session, project: ProjectConfig): Promise<string | null> {
-      if (!session.workspacePath) return null;
+      let data: CodexSessionData | null = null;
+      for (const workspacePath of getSessionWorkspaceCandidates(session)) {
+        const sessionFile = await findCodexSessionFileCached(workspacePath);
+        if (!sessionFile) continue;
 
-      // Find the Codex session file for this workspace
-      const sessionFile = await findCodexSessionFileCached(session.workspacePath);
-      if (!sessionFile) return null;
-
-      // Stream the file line-by-line to avoid loading potentially huge
-      // rollout files (100 MB+) entirely into memory.
-      const data = await streamCodexSessionData(sessionFile);
+        // Stream the file line-by-line to avoid loading potentially huge
+        // rollout files (100 MB+) entirely into memory.
+        data = await streamCodexSessionData(sessionFile);
+        if (data?.threadId) break;
+      }
       if (!data?.threadId) return null;
 
       // Use Codex's native `resume` subcommand for proper conversation resume.

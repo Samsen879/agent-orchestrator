@@ -1182,8 +1182,12 @@ export interface SessionManager {
     projectId?: string,
     options?: { dryRun?: boolean; purgeOpenCode?: boolean },
   ): Promise<CleanupResult>;
-  send(sessionId: SessionId, message: string): Promise<void>;
+  send(sessionId: SessionId, message: string, options?: SendOptions): Promise<void>;
   claimPR(sessionId: SessionId, prRef: string, options?: ClaimPROptions): Promise<ClaimPRResult>;
+}
+
+export interface SendOptions {
+  requireConfirmation?: boolean;
 }
 
 /** OpenCode-specific session manager with remap capability */
@@ -1314,6 +1318,14 @@ export class SessionNotFoundError extends Error {
   constructor(public readonly sessionId: string) {
     super(`Session not found: ${sessionId}`);
     this.name = "SessionNotFoundError";
+  }
+}
+
+/** Thrown when a message may have been sent but the runtime never confirmed delivery. */
+export class MessageDeliveryUnconfirmedError extends Error {
+  constructor(public readonly sessionId: string) {
+    super(`Could not confirm delivery to session ${sessionId}`);
+    this.name = "MessageDeliveryUnconfirmedError";
   }
 }
 

@@ -46,8 +46,16 @@ import {
   MAX_PORT_SCAN,
 } from "../lib/web-dir.js";
 import { cleanNextCache } from "../lib/dashboard-rebuild.js";
+import { stopDashboardProcessTree, waitForDashboardReady } from "../lib/dashboard-process.js";
+import { ShutdownCoordinator } from "../lib/shutdown-coordinator.js";
 import { preflight } from "../lib/preflight.js";
-import { register, unregister, isAlreadyRunning, getRunning, waitForExit } from "../lib/running-state.js";
+import {
+  register,
+  unregister,
+  isAlreadyRunning,
+  getRunning,
+  waitForExit,
+} from "../lib/running-state.js";
 import { isHumanCaller } from "../lib/caller-context.js";
 import { detectEnvironment } from "../lib/detect-env.js";
 import { detectAgentRuntime } from "../lib/detect-agent.js";
@@ -59,6 +67,7 @@ import {
 } from "../lib/project-detection.js";
 
 const DEFAULT_PORT = 3000;
+const STOP_TIMEOUT_MS = 5_000;
 
 // =============================================================================
 // HELPERS
@@ -348,7 +357,9 @@ async function addProjectToConfig(
     let i = 2;
     while (config.projects[`${projectId}-${i}`]) i++;
     const newId = `${projectId}-${i}`;
-    console.log(chalk.yellow(`  ⚠ Project "${projectId}" already exists — using "${newId}" instead.`));
+    console.log(
+      chalk.yellow(`  ⚠ Project "${projectId}" already exists — using "${newId}" instead.`),
+    );
     projectId = newId;
   }
 
@@ -440,13 +451,18 @@ export async function createConfigOnly(): Promise<void> {
  * Start dashboard server in the background.
  * Returns the child process handle for cleanup.
  */
+interface StartedDashboard {
+  child: ChildProcess;
+  servicePorts: number[];
+}
+
 async function startDashboard(
   port: number,
   webDir: string,
   configPath: string | null,
   terminalPort?: number,
   directTerminalPort?: number,
-): Promise<ChildProcess> {
+): Promise<StartedDashboard> {
   const env = await buildDashboardEnv(port, configPath, terminalPort, directTerminalPort);
 
   // Detect dev vs production: the `server/` source directory only exists in the
@@ -459,7 +475,7 @@ async function startDashboard(
     child = spawn("pnpm", ["run", "dev"], {
       cwd: webDir,
       stdio: "inherit",
-      detached: false,
+      detached: process.platform !== "win32",
       env,
     });
   } else {
@@ -467,7 +483,7 @@ async function startDashboard(
     child = spawn("node", [resolve(webDir, "dist-server", "start-all.js")], {
       cwd: webDir,
       stdio: "inherit",
-      detached: false,
+      detached: process.platform !== "win32",
       env,
     });
   }
@@ -478,7 +494,10 @@ async function startDashboard(
     child.emit("exit", 1, null);
   });
 
-  return child;
+  return {
+    child,
+    servicePorts: [port, Number(env["TERMINAL_PORT"]), Number(env["DIRECT_TERMINAL_PORT"])],
+  };
 }
 
 /**
@@ -489,6 +508,7 @@ async function runStartup(
   config: OrchestratorConfig,
   projectId: string,
   project: ProjectConfig,
+  shutdown: ShutdownCoordinator,
   opts?: { dashboard?: boolean; orchestrator?: boolean; rebuild?: boolean },
 ): Promise<number> {
   const sessionId = `${project.sessionPrefix}-orchestrator`;
@@ -507,6 +527,21 @@ async function runStartup(
 
   // Start dashboard (unless --no-dashboard)
   if (opts?.dashboard !== false) {
+    const configuredTerminalPorts = [config.terminalPort, config.directTerminalPort].filter(
+      (candidate): candidate is number => typeof candidate === "number",
+    );
+    const configuredTerminalAvailability = await Promise.all(
+      configuredTerminalPorts.map((candidate) => isPortAvailable(candidate)),
+    );
+    const busyTerminalPorts = configuredTerminalPorts.filter(
+      (_candidate, index) => !configuredTerminalAvailability[index],
+    );
+    if (busyTerminalPorts.length > 0) {
+      throw new Error(
+        `AO terminal port${busyTerminalPorts.length === 1 ? " is" : "s are"} already in use: ${busyTerminalPorts.join(", ")}. Run 'ao stop' to clean stale services before starting again.`,
+      );
+    }
+
     if (!(await isPortAvailable(port))) {
       const newPort = await findFreePort(port + 1);
       if (newPort === null) {
@@ -525,21 +560,33 @@ async function runStartup(
     }
 
     spinner.start("Starting dashboard");
-    dashboardProcess = await startDashboard(
+    const startedDashboard = await startDashboard(
       port,
       webDir,
       config.configPath,
       config.terminalPort,
       config.directTerminalPort,
     );
-    spinner.succeed(`Dashboard starting on http://localhost:${port}`);
-    console.log(chalk.dim("  (Dashboard will be ready in a few seconds)\n"));
+    dashboardProcess = startedDashboard.child;
+    shutdown.add(() => stopDashboardProcessTree(startedDashboard.child));
+    try {
+      await waitForDashboardReady(dashboardProcess, startedDashboard.servicePorts);
+    } catch (err) {
+      spinner.fail("Dashboard failed to start");
+      await shutdown.cleanup();
+      throw err;
+    }
+    spinner.succeed(`Dashboard ready on http://localhost:${port}`);
+    console.log();
   }
 
   if (shouldStartLifecycle) {
     try {
       spinner.start("Starting lifecycle worker");
       lifecycleStatus = await ensureLifecycleWorker(config, projectId);
+      shutdown.add(async () => {
+        await stopLifecycleWorker(config, projectId);
+      });
       spinner.succeed(
         lifecycleStatus.started
           ? `Lifecycle worker started${lifecycleStatus.pid ? ` (PID ${lifecycleStatus.pid})` : ""}`
@@ -547,9 +594,7 @@ async function runStartup(
       );
     } catch (err) {
       spinner.fail("Lifecycle worker failed to start");
-      if (dashboardProcess) {
-        dashboardProcess.kill();
-      }
+      await shutdown.cleanup();
       throw new Error(
         `Failed to start lifecycle worker: ${err instanceof Error ? err.message : String(err)}`,
         { cause: err },
@@ -566,6 +611,10 @@ async function runStartup(
       spinner.start("Creating orchestrator session");
       const systemPrompt = generateOrchestratorPrompt({ config, projectId, project });
       const session = await sm.spawnOrchestrator({ projectId, systemPrompt });
+      shutdown.add(async () => {
+        const current = await sm.get(sessionId);
+        if (current) await sm.kill(sessionId, { purgeOpenCode: true });
+      });
       if (session.runtimeHandle?.id) {
         tmuxTarget = session.runtimeHandle.id;
       }
@@ -575,9 +624,7 @@ async function runStartup(
       spinner.succeed(reused ? "Orchestrator session reused" : "Orchestrator session created");
     } catch (err) {
       spinner.fail("Orchestrator setup failed");
-      if (dashboardProcess) {
-        dashboardProcess.kill();
-      }
+      await shutdown.cleanup();
       throw new Error(
         `Failed to setup orchestrator: ${err instanceof Error ? err.message : String(err)}`,
         { cause: err },
@@ -622,6 +669,7 @@ async function runStartup(
   let openAbort: AbortController | undefined;
   if (opts?.dashboard !== false) {
     openAbort = new AbortController();
+    shutdown.add(() => openAbort?.abort());
     const orchestratorUrl = `http://localhost:${port}/sessions/${sessionId}`;
     void waitForPortAndOpen(port, orchestratorUrl, openAbort.signal);
   }
@@ -630,40 +678,168 @@ async function runStartup(
   if (dashboardProcess) {
     dashboardProcess.on("exit", (code) => {
       if (openAbort) openAbort.abort();
-      if (code !== 0 && code !== null) {
-        console.error(chalk.red(`Dashboard exited with code ${code}`));
-      }
-      process.exit(code ?? 0);
+      if (shutdown.isCleaningUp) return;
+      console.error(chalk.red(`Dashboard exited unexpectedly with code ${code ?? "unknown"}`));
+      void shutdown.cleanupAndExit(code && code !== 0 ? code : 1);
     });
   }
 
   return port;
 }
 
-/**
- * Stop dashboard server.
- * Uses lsof to find the process listening on the port, then kills it.
- * Best effort — if it fails, just warn the user.
- */
-async function stopDashboard(port: number): Promise<void> {
+async function findListenerPids(port: number): Promise<number[]> {
   try {
-    // Find PIDs listening on the port (can be multiple: parent + children)
-    const { stdout } = await exec("lsof", ["-ti", `:${port}`]);
-    const pids = stdout
-      .trim()
-      .split("\n")
-      .filter((p) => p.length > 0);
+    const { stdout } = await exec("lsof", ["-ti", `:${port}`, "-sTCP:LISTEN"]);
+    const lsofPids = [
+      ...new Set(
+        stdout
+          .trim()
+          .split("\n")
+          .map((value) => Number(value))
+          .filter((value) => Number.isInteger(value) && value > 0),
+      ),
+    ];
+    if (lsofPids.length > 0) return lsofPids;
+  } catch {
+    // lsof cannot inspect some WSL process namespaces; fall through to ss.
+  }
 
-    if (pids.length > 0) {
-      // Kill all processes (pass PIDs as separate arguments)
-      await exec("kill", pids);
-      console.log(chalk.green("Dashboard stopped"));
-    } else {
-      console.log(chalk.yellow(`Dashboard not running on port ${port}`));
+  try {
+    const { stdout } = await exec("ss", ["-H", "-ltnp", `sport = :${port}`]);
+    return [
+      ...new Set(
+        [...stdout.matchAll(/pid=(\d+)/g)]
+          .map((match) => Number(match[1]))
+          .filter((value) => Number.isInteger(value) && value > 0),
+      ),
+    ];
+  } catch {
+    return [];
+  }
+}
+
+async function signalListenerProcessTree(
+  pid: number,
+  signal: "SIGTERM" | "SIGKILL",
+): Promise<void> {
+  if (process.platform === "win32") {
+    try {
+      const args = ["/PID", String(pid), "/T"];
+      if (signal === "SIGKILL") args.push("/F");
+      await exec("taskkill", args);
+    } catch {
+      // Best effort; the listener may already have exited.
+    }
+    return;
+  }
+
+  try {
+    const { stdout } = await exec("ps", ["-o", "pgid=", "-p", String(pid)]);
+    const pgid = Number(stdout.trim());
+    if (Number.isInteger(pgid) && pgid > 0) {
+      process.kill(-pgid, signal);
+      return;
     }
   } catch {
-    console.log(chalk.yellow("Could not stop dashboard (may not be running)"));
+    // Fall back to the listener itself.
   }
+
+  try {
+    process.kill(pid, signal);
+  } catch {
+    // Listener already exited.
+  }
+}
+
+/** Stop the complete process group owning a dashboard or terminal listener. */
+async function stopDashboard(port: number): Promise<void> {
+  if (await isPortAvailable(port)) return;
+
+  const pids = await findListenerPids(port);
+  for (const pid of pids) await signalListenerProcessTree(pid, "SIGTERM");
+
+  try {
+    await waitForPortsToBeFree([port], 1_500);
+  } catch {
+    const remainingPids = await findListenerPids(port);
+    for (const pid of remainingPids) await signalListenerProcessTree(pid, "SIGKILL");
+    await waitForPortsToBeFree([port], STOP_TIMEOUT_MS);
+  }
+
+  console.log(chalk.green(`Stopped service on port ${port}`));
+}
+
+function collectStopPorts(...ports: Array<number | null | undefined>): number[] {
+  return [
+    ...new Set(
+      ports.filter(
+        (port): port is number => typeof port === "number" && Number.isInteger(port) && port > 0,
+      ),
+    ),
+  ];
+}
+
+async function waitForPortsToBeFree(ports: number[], timeoutMs = STOP_TIMEOUT_MS): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const availability = await Promise.all(ports.map((port) => isPortAvailable(port)));
+    if (availability.every(Boolean)) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+
+  const stillBusy: number[] = [];
+  for (const port of ports) {
+    if (!(await isPortAvailable(port))) {
+      stillBusy.push(port);
+    }
+  }
+
+  if (stillBusy.length > 0) {
+    throw new Error(`Ports still in use after ${timeoutMs}ms: ${stillBusy.join(", ")}`);
+  }
+}
+
+async function stopRunningAoProcessTree(pid: number): Promise<void> {
+  if (process.platform === "win32") {
+    try {
+      await exec("taskkill", ["/PID", String(pid), "/T", "/F"]);
+    } catch {
+      try {
+        process.kill(pid, "SIGTERM");
+      } catch {
+        return;
+      }
+    }
+    return;
+  }
+
+  let signaledProcessGroup = false;
+
+  try {
+    process.kill(-pid, "SIGTERM");
+    signaledProcessGroup = true;
+  } catch {
+    try {
+      process.kill(pid, "SIGTERM");
+    } catch {
+      return;
+    }
+  }
+
+  if (await waitForExit(pid, STOP_TIMEOUT_MS)) {
+    return;
+  }
+
+  try {
+    process.kill(signaledProcessGroup ? -pid : pid, "SIGKILL");
+  } catch {
+    // Best effort hard stop
+  }
+
+  await waitForExit(pid, STOP_TIMEOUT_MS);
 }
 
 // =============================================================================
@@ -688,6 +864,7 @@ export function registerStart(program: Command): void {
           rebuild?: boolean;
         },
       ) => {
+        let shutdown: ShutdownCoordinator | null = null;
         try {
           let config: OrchestratorConfig;
           let projectId: string;
@@ -728,7 +905,8 @@ export function registerStart(program: Command): void {
 
               // Check if project is already in config (match by path)
               const existingEntry = Object.entries(config.projects).find(
-                ([, p]) => resolve(p.path.replace(/^~/, process.env["HOME"] || "")) === resolvedPath,
+                ([, p]) =>
+                  resolve(p.path.replace(/^~/, process.env["HOME"] || "")) === resolvedPath,
               );
 
               if (existingEntry) {
@@ -794,9 +972,9 @@ export function registerStart(program: Command): void {
 
                 // Collect existing prefixes to avoid collisions
                 const existingPrefixes = new Set(
-                  Object.values(rawConfig.projects as Record<string, Record<string, unknown>>).map(
-                    (p) => p.sessionPrefix as string,
-                  ).filter(Boolean),
+                  Object.values(rawConfig.projects as Record<string, Record<string, unknown>>)
+                    .map((p) => p.sessionPrefix as string)
+                    .filter(Boolean),
                 );
 
                 let newId: string;
@@ -818,10 +996,18 @@ export function registerStart(program: Command): void {
                 project = config.projects[newId];
                 // Continue to startup below
               } else if (choice.trim() === "3") {
-                try { process.kill(running.pid, "SIGTERM"); } catch { /* already dead */ }
+                try {
+                  process.kill(running.pid, "SIGTERM");
+                } catch {
+                  /* already dead */
+                }
                 if (!(await waitForExit(running.pid, 5000))) {
                   console.log(chalk.yellow("  Process didn't exit cleanly, sending SIGKILL..."));
-                  try { process.kill(running.pid, "SIGKILL"); } catch { /* already dead */ }
+                  try {
+                    process.kill(running.pid, "SIGKILL");
+                  } catch {
+                    /* already dead */
+                  }
                 }
                 await unregister();
                 console.log(chalk.yellow("\n  Stopped existing instance. Restarting...\n"));
@@ -840,7 +1026,9 @@ export function registerStart(program: Command): void {
             }
           }
 
-          const actualPort = await runStartup(config, projectId, project, opts);
+          shutdown = new ShutdownCoordinator();
+          shutdown.installSignalHandlers();
+          const actualPort = await runStartup(config, projectId, project, shutdown, opts);
 
           // ── Register in running.json (Step 10) ──
           await register({
@@ -850,7 +1038,9 @@ export function registerStart(program: Command): void {
             startedAt: new Date().toISOString(),
             projects: Object.keys(config.projects),
           });
+          shutdown.add(() => unregister());
         } catch (err) {
+          if (shutdown) await shutdown.cleanup();
           if (err instanceof Error) {
             console.error(chalk.red("\nError:"), err.message);
           } else {
@@ -895,9 +1085,7 @@ export function registerStop(program: Command): void {
                 // Already dead
               }
               await unregister();
-              console.log(
-                chalk.green(`\n✓ Stopped AO on port ${running.port}`),
-              );
+              console.log(chalk.green(`\n✓ Stopped AO on port ${running.port}`));
               console.log(chalk.dim(`  Projects: ${running.projects.join(", ")}\n`));
             } else {
               console.log(chalk.yellow("No running AO instance found in running.json."));
@@ -909,16 +1097,22 @@ export function registerStop(program: Command): void {
           const { projectId: _projectId, project } = resolveProject(config, projectArg);
           const sessionId = `${project.sessionPrefix}-orchestrator`;
           const port = config.port ?? 3000;
+          const stopPorts = collectStopPorts(
+            running?.port,
+            port,
+            config.terminalPort,
+            config.directTerminalPort,
+          );
 
           console.log(chalk.bold(`\nStopping orchestrator for ${chalk.cyan(project.name)}\n`));
 
           // Kill orchestrator session via SessionManager
           const sm = await getSessionManager(config);
           const existing = await sm.get(sessionId);
+          const purgeOpenCode = opts.purgeSession === true ? true : opts.keepSession !== true;
 
           if (existing) {
             const spinner = ora("Stopping orchestrator session").start();
-            const purgeOpenCode = opts.purgeSession === true ? true : opts.keepSession !== true;
             await sm.kill(sessionId, { purgeOpenCode });
             spinner.succeed("Orchestrator session stopped");
           } else {
@@ -932,25 +1126,34 @@ export function registerStop(program: Command): void {
             console.log(chalk.yellow("Lifecycle worker not running"));
           }
 
-          // Stop dashboard — kill parent PID from running.json, then also stop
-          // any dashboard child process via lsof (parent SIGTERM may not propagate)
+          const cleanupResult = await sm.cleanup(_projectId, { purgeOpenCode });
+          if (cleanupResult.killed.length > 0) {
+            console.log(
+              chalk.green(`Cleaned up ${cleanupResult.killed.length} completed session(s)`),
+            );
+          }
+          if (cleanupResult.errors.length > 0) {
+            console.log(
+              chalk.yellow(`Session cleanup reported ${cleanupResult.errors.length} error(s)`),
+            );
+          }
+
+          // Stop the AO runner first so the dashboard process tree receives the
+          // initial shutdown signal as a single unit. Then fall back to
+          // listener-targeted cleanup for any stale dashboard or terminal ports.
           if (running) {
-            try {
-              process.kill(running.pid, "SIGTERM");
-            } catch {
-              // Already dead
-            }
+            await stopRunningAoProcessTree(running.pid);
             await unregister();
           }
-          await stopDashboard(running?.port ?? port);
+
+          for (const stopPort of stopPorts) {
+            await stopDashboard(stopPort);
+          }
+          await waitForPortsToBeFree(stopPorts);
 
           console.log(chalk.bold.green("\n✓ Orchestrator stopped\n"));
-          console.log(
-            chalk.dim(`  Uptime: since ${running?.startedAt ?? "unknown"}`),
-          );
-          console.log(
-            chalk.dim(`  Projects: ${Object.keys(config.projects).join(", ")}\n`),
-          );
+          console.log(chalk.dim(`  Uptime: since ${running?.startedAt ?? "unknown"}`));
+          console.log(chalk.dim(`  Projects: ${Object.keys(config.projects).join(", ")}\n`));
         } catch (err) {
           if (err instanceof Error) {
             console.error(chalk.red("\nError:"), err.message);

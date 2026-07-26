@@ -17,6 +17,10 @@ import type {
 const execFileAsync = promisify(execFile);
 const TMUX_COMMAND_TIMEOUT_MS = 5_000;
 const MISSING_SESSION_PATTERNS = [/can't find session/i, /session not found/i, /no such session/i];
+const CODEX_FILE_NOTE_PREFIX = "AO note: Read ";
+const SEND_MESSAGE_CONFIRM_LINES = 20;
+const SEND_MESSAGE_CONFIRM_DELAY_MS = 300;
+const SEND_MESSAGE_ENTER_RETRY_LIMIT = 2;
 
 export const manifest = {
   name: "tmux",
@@ -55,6 +59,29 @@ async function tmux(...args: string[]): Promise<string> {
     timeout: TMUX_COMMAND_TIMEOUT_MS,
   });
   return stdout.trimEnd();
+}
+
+function outputShowsPendingPromptDraft(output: string, message: string): boolean {
+  if (!output.trim() || !message.trim() || message.includes("\n")) {
+    return false;
+  }
+
+  const normalizedMessage = message.trim();
+  return output
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .some((line) => {
+      const match = line.match(/^[›❯]\s*(.+)$/u);
+      if (!match) return false;
+      const draft = match[1]?.trim();
+      if (!draft) return false;
+      return normalizedMessage.startsWith(draft);
+    });
+}
+
+function shouldRetryCodexFileNoteSubmit(message: string): boolean {
+  return !message.includes("\n") && message.startsWith(CODEX_FILE_NOTE_PREFIX);
 }
 
 export function create(): Runtime {
@@ -162,8 +189,29 @@ export function create(): Runtime {
 
       // Small delay to let tmux process the pasted text before pressing Enter.
       // Without this, Enter can arrive before the text is fully rendered.
-      await sleep(300);
+      await sleep(SEND_MESSAGE_CONFIRM_DELAY_MS);
       await tmux("send-keys", "-t", handle.id, "Enter");
+
+      // Codex occasionally leaves the text sitting in the composer even after
+      // the first Enter. If the prompt still shows the message draft, press
+      // Enter again a couple of times rather than reporting a false delivery.
+      if (shouldRetryCodexFileNoteSubmit(message)) {
+        for (let attempt = 0; attempt < SEND_MESSAGE_ENTER_RETRY_LIMIT; attempt++) {
+          await sleep(SEND_MESSAGE_CONFIRM_DELAY_MS);
+          const output = await tmux(
+            "capture-pane",
+            "-t",
+            handle.id,
+            "-p",
+            "-S",
+            `-${SEND_MESSAGE_CONFIRM_LINES}`,
+          );
+          if (!outputShowsPendingPromptDraft(output, message)) {
+            break;
+          }
+          await tmux("send-keys", "-t", handle.id, "Enter");
+        }
+      }
     },
 
     async getOutput(handle: RuntimeHandle, lines = 50): Promise<string> {

@@ -21,9 +21,22 @@ const {
   mockConfigRef,
   mockSessionManager,
   mockWaitForPortAndOpen,
+  mockBuildDashboardEnv,
   mockSpawn,
   mockEnsureLifecycleWorker,
   mockStopLifecycleWorker,
+  mockRegister,
+  mockUnregister,
+  mockGetRunning,
+  mockWaitForExit,
+  mockIsPortAvailable,
+  mockFindFreePort,
+  mockWaitForDashboardReady,
+  mockStopDashboardProcessTree,
+  mockShutdownTasks,
+  mockShutdownAdd,
+  mockShutdownCleanup,
+  mockShutdownInstall,
 } = vi.hoisted(() => ({
   mockExec: vi.fn(),
   mockExecSilent: vi.fn(),
@@ -39,9 +52,22 @@ const {
     claimPR: vi.fn(),
   },
   mockWaitForPortAndOpen: vi.fn().mockResolvedValue(undefined),
+  mockBuildDashboardEnv: vi.fn(),
   mockSpawn: vi.fn(),
   mockEnsureLifecycleWorker: vi.fn(),
   mockStopLifecycleWorker: vi.fn(),
+  mockRegister: vi.fn(),
+  mockUnregister: vi.fn(),
+  mockGetRunning: vi.fn(),
+  mockWaitForExit: vi.fn(),
+  mockIsPortAvailable: vi.fn(),
+  mockFindFreePort: vi.fn(),
+  mockWaitForDashboardReady: vi.fn(),
+  mockStopDashboardProcessTree: vi.fn(),
+  mockShutdownTasks: { current: [] as Array<() => void | Promise<void>> },
+  mockShutdownAdd: vi.fn(),
+  mockShutdownCleanup: vi.fn(),
+  mockShutdownInstall: vi.fn(),
 }));
 
 vi.mock("../../src/lib/shell.js", () => ({
@@ -96,10 +122,10 @@ vi.mock("../../src/lib/lifecycle-service.js", () => ({
 
 vi.mock("../../src/lib/web-dir.js", () => ({
   findWebDir: vi.fn().mockReturnValue("/fake/web"),
-  buildDashboardEnv: vi.fn().mockResolvedValue({}),
+  buildDashboardEnv: (...args: unknown[]) => mockBuildDashboardEnv(...args),
   waitForPortAndOpen: (...args: unknown[]) => mockWaitForPortAndOpen(...args),
-  isPortAvailable: vi.fn().mockResolvedValue(true),
-  findFreePort: vi.fn().mockResolvedValue(3000),
+  isPortAvailable: (...args: unknown[]) => mockIsPortAvailable(...args),
+  findFreePort: (...args: unknown[]) => mockFindFreePort(...args),
 }));
 
 vi.mock("../../src/lib/dashboard-rebuild.js", () => ({
@@ -107,6 +133,36 @@ vi.mock("../../src/lib/dashboard-rebuild.js", () => ({
   findRunningDashboardPid: vi.fn().mockResolvedValue(null),
   findProcessWebDir: vi.fn().mockResolvedValue(null),
   waitForPortFree: vi.fn(),
+}));
+
+vi.mock("../../src/lib/dashboard-process.js", () => ({
+  waitForDashboardReady: (...args: unknown[]) => mockWaitForDashboardReady(...args),
+  stopDashboardProcessTree: (...args: unknown[]) => mockStopDashboardProcessTree(...args),
+}));
+
+vi.mock("../../src/lib/shutdown-coordinator.js", () => ({
+  ShutdownCoordinator: class {
+    isCleaningUp = false;
+    private cleanupStarted = false;
+    add(task: () => void | Promise<void>): void {
+      mockShutdownAdd(task);
+      mockShutdownTasks.current.push(task);
+    }
+    installSignalHandlers(): void {
+      mockShutdownInstall();
+    }
+    async cleanup(): Promise<void> {
+      if (this.cleanupStarted) return;
+      this.cleanupStarted = true;
+      this.isCleaningUp = true;
+      await mockShutdownCleanup();
+      for (const task of [...mockShutdownTasks.current].reverse()) await task();
+    }
+    async cleanupAndExit(): Promise<never> {
+      await this.cleanup();
+      throw new Error("cleanupAndExit");
+    }
+  },
 }));
 
 vi.mock("../../src/lib/preflight.js", () => ({
@@ -117,11 +173,11 @@ vi.mock("../../src/lib/preflight.js", () => ({
 }));
 
 vi.mock("../../src/lib/running-state.js", () => ({
-  register: vi.fn(),
-  unregister: vi.fn(),
+  register: (...args: unknown[]) => mockRegister(...args),
+  unregister: (...args: unknown[]) => mockUnregister(...args),
   isAlreadyRunning: vi.fn().mockReturnValue(null),
-  getRunning: vi.fn().mockReturnValue(null),
-  waitForExit: vi.fn().mockReturnValue(true),
+  getRunning: (...args: unknown[]) => mockGetRunning(...args),
+  waitForExit: (...args: unknown[]) => mockWaitForExit(...args),
 }));
 
 vi.mock("../../src/lib/caller-context.js", () => ({
@@ -131,7 +187,13 @@ vi.mock("../../src/lib/caller-context.js", () => ({
 
 vi.mock("../../src/lib/detect-env.js", () => ({
   detectEnvironment: vi.fn().mockResolvedValue({
-    git: { isRepo: true, remoteUrl: null, ownerRepo: null, currentBranch: "main", defaultBranch: "main" },
+    git: {
+      isRepo: true,
+      remoteUrl: null,
+      ownerRepo: null,
+      currentBranch: "main",
+      defaultBranch: "main",
+    },
     tools: { hasTmux: true, hasGh: false, ghAuthed: false },
     apiKeys: { hasLinear: false, hasSlack: false },
   }),
@@ -190,12 +252,32 @@ beforeEach(() => {
   mockSessionManager.get.mockReset();
   mockSessionManager.spawnOrchestrator.mockReset();
   mockSessionManager.kill.mockReset();
+  mockSessionManager.cleanup.mockReset();
+  mockSessionManager.cleanup.mockResolvedValue({ killed: [], skipped: [], errors: [] });
   mockExec.mockReset();
   mockExecSilent.mockReset();
   // Default: execSilent returns null (gh not available), so clone falls through to git SSH/HTTPS
   mockExecSilent.mockResolvedValue(null);
   mockWaitForPortAndOpen.mockReset();
   mockWaitForPortAndOpen.mockResolvedValue(undefined);
+  mockBuildDashboardEnv.mockReset();
+  mockBuildDashboardEnv.mockResolvedValue({
+    TERMINAL_PORT: "14810",
+    DIRECT_TERMINAL_PORT: "14811",
+  });
+  mockIsPortAvailable.mockReset();
+  mockIsPortAvailable.mockResolvedValue(true);
+  mockFindFreePort.mockReset();
+  mockFindFreePort.mockResolvedValue(3000);
+  mockWaitForDashboardReady.mockReset();
+  mockWaitForDashboardReady.mockResolvedValue(undefined);
+  mockStopDashboardProcessTree.mockReset();
+  mockStopDashboardProcessTree.mockResolvedValue(undefined);
+  mockShutdownTasks.current = [];
+  mockShutdownAdd.mockReset();
+  mockShutdownCleanup.mockReset();
+  mockShutdownCleanup.mockResolvedValue(undefined);
+  mockShutdownInstall.mockReset();
   mockEnsureLifecycleWorker.mockReset();
   mockEnsureLifecycleWorker.mockResolvedValue({
     running: true,
@@ -206,6 +288,14 @@ beforeEach(() => {
   });
   mockStopLifecycleWorker.mockReset();
   mockStopLifecycleWorker.mockResolvedValue(true);
+  mockRegister.mockReset();
+  mockRegister.mockResolvedValue(undefined);
+  mockUnregister.mockReset();
+  mockUnregister.mockResolvedValue(undefined);
+  mockGetRunning.mockReset();
+  mockGetRunning.mockResolvedValue(null);
+  mockWaitForExit.mockReset();
+  mockWaitForExit.mockResolvedValue(true);
   mockSpawn.mockClear();
 });
 
@@ -619,6 +709,44 @@ describe("start command — browser open waits for port", () => {
       expect.objectContaining({ configPath: expect.any(String) }),
       "my-app",
     );
+    expect(mockWaitForDashboardReady).toHaveBeenCalledWith(expect.anything(), [3000, 14810, 14811]);
+    expect(mockSpawn).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.any(Array),
+      expect.objectContaining({ detached: process.platform !== "win32" }),
+    );
+  });
+
+  it("rolls back the dashboard and does not start lifecycle when readiness fails", async () => {
+    mockConfigRef.current = makeConfig({ "my-app": makeProject() });
+    const { findWebDir } = await import("../../src/lib/web-dir.js");
+    vi.mocked(findWebDir).mockReturnValue(tmpDir);
+    writeFileSync(join(tmpDir, "package.json"), "{}");
+    mockWaitForDashboardReady.mockRejectedValue(new Error("EADDRINUSE"));
+
+    await expect(
+      program.parseAsync(["node", "test", "start", "--no-orchestrator"]),
+    ).rejects.toThrow("process.exit(1)");
+
+    expect(mockStopDashboardProcessTree).toHaveBeenCalledTimes(1);
+    expect(mockEnsureLifecycleWorker).not.toHaveBeenCalled();
+  });
+
+  it("fails before spawning when a configured terminal port is already occupied", async () => {
+    mockConfigRef.current = {
+      ...makeConfig({ "my-app": makeProject() }),
+      terminalPort: 14810,
+      directTerminalPort: 14811,
+    };
+    mockIsPortAvailable.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+
+    await expect(
+      program.parseAsync(["node", "test", "start", "--no-orchestrator"]),
+    ).rejects.toThrow("process.exit(1)");
+
+    expect(mockSpawn).not.toHaveBeenCalled();
+    expect(mockEnsureLifecycleWorker).not.toHaveBeenCalled();
+    expect(vi.mocked(console.error).mock.calls.flat().join(" ")).toContain("14810");
   });
 
   it("skips browser open and lifecycle with --no-dashboard --no-orchestrator", async () => {
@@ -728,6 +856,56 @@ describe("start command — orchestrator session strategy display", () => {
 // ---------------------------------------------------------------------------
 
 describe("stop command", () => {
+  it("falls back to ss when lsof cannot see a stale listener", async () => {
+    mockConfigRef.current = makeConfig({ "my-app": makeProject() });
+    mockSessionManager.get.mockResolvedValue(null);
+    mockIsPortAvailable
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true)
+      .mockResolvedValue(true);
+    mockExec.mockImplementation(async (cmd: string) => {
+      if (cmd === "lsof") throw new Error("permission denied");
+      if (cmd === "ss") {
+        return {
+          stdout: 'LISTEN 0 511 *:3000 *:* users:(("next-server",pid=4321,fd=22))',
+          stderr: "",
+        };
+      }
+      if (cmd === "ps") return { stdout: "4321\n", stderr: "" };
+      return { stdout: "", stderr: "" };
+    });
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
+
+    await program.parseAsync(["node", "test", "stop"]);
+
+    expect(killSpy).toHaveBeenCalledWith(-4321, "SIGTERM");
+  });
+
+  it("kills the running AO process group and waits for dashboard ports to free", async () => {
+    mockConfigRef.current = makeConfig({
+      "my-app": makeProject(),
+    });
+    mockGetRunning.mockResolvedValue({
+      pid: 4321,
+      configPath: join(tmpDir, "agent-orchestrator.yaml"),
+      port: 3315,
+      startedAt: "2026-04-16T00:00:00.000Z",
+      projects: ["my-app"],
+    });
+    mockSessionManager.get.mockResolvedValue(null);
+
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
+
+    await program.parseAsync(["node", "test", "stop"]);
+
+    expect(killSpy).toHaveBeenCalledWith(-4321, "SIGTERM");
+    expect(mockWaitForExit).toHaveBeenCalledWith(4321, 5000);
+    expect(mockIsPortAvailable).toHaveBeenCalledWith(3315);
+    expect(mockIsPortAvailable).toHaveBeenCalledWith(3000);
+    expect(mockExec).not.toHaveBeenCalled();
+    expect(mockUnregister).toHaveBeenCalled();
+  });
+
   it("stops orchestrator session and dashboard", async () => {
     mockConfigRef.current = makeConfig({ "my-app": makeProject() });
     mockSessionManager.get.mockResolvedValue({ id: "app-orchestrator", status: "running" });
@@ -737,6 +915,9 @@ describe("stop command", () => {
     await program.parseAsync(["node", "test", "stop"]);
 
     expect(mockSessionManager.kill).toHaveBeenCalledWith("app-orchestrator", {
+      purgeOpenCode: true,
+    });
+    expect(mockSessionManager.cleanup).toHaveBeenCalledWith("my-app", {
       purgeOpenCode: true,
     });
     expect(mockStopLifecycleWorker).toHaveBeenCalledWith(
@@ -758,6 +939,9 @@ describe("stop command", () => {
     await program.parseAsync(["node", "test", "stop"]);
 
     expect(mockSessionManager.kill).not.toHaveBeenCalled();
+    expect(mockSessionManager.cleanup).toHaveBeenCalledWith("my-app", {
+      purgeOpenCode: true,
+    });
     expect(mockStopLifecycleWorker).toHaveBeenCalledWith(
       expect.objectContaining({ configPath: expect.any(String) }),
       "my-app",
@@ -789,6 +973,9 @@ describe("stop command", () => {
     await program.parseAsync(["node", "test", "stop", "--keep-session"]);
 
     expect(mockSessionManager.kill).toHaveBeenCalledWith("app-orchestrator", {
+      purgeOpenCode: false,
+    });
+    expect(mockSessionManager.cleanup).toHaveBeenCalledWith("my-app", {
       purgeOpenCode: false,
     });
   });
