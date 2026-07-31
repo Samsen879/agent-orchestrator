@@ -1703,6 +1703,87 @@ describe("reactions", () => {
     expect(mockSessionManager.send).not.toHaveBeenCalled();
   });
 
+  it("routes each terminal worker epoch to the orchestrator exactly once", async () => {
+    config.reactions = {
+      "all-complete": {
+        auto: true,
+        action: "send-to-orchestrator",
+        message: "Audit the completed worker epoch before stopping.",
+      },
+    };
+
+    const orchestrator = makeSession({
+      id: "app-orchestrator",
+      status: "working",
+      branch: "main",
+      issueId: null,
+      metadata: { role: "orchestrator", status: "working" },
+    });
+    const firstWorker = makeSession({
+      id: "app-1",
+      status: "merged",
+      runtimeHandle: null,
+      metadata: { status: "merged" },
+    });
+    let sessions = [orchestrator, firstWorker];
+
+    vi.mocked(mockSessionManager.list).mockImplementation(async () => sessions);
+    vi.mocked(mockSessionManager.get).mockImplementation(async (sessionId) => {
+      return sessions.find((session) => session.id === sessionId) ?? null;
+    });
+
+    writeMetadata(sessionsDir, "app-orchestrator", {
+      worktree: "/tmp",
+      branch: "main",
+      status: "working",
+      project: "my-app",
+      role: "orchestrator",
+    });
+
+    const lm = createLifecycleManager({
+      config,
+      registry: mockRegistry,
+      sessionManager: mockSessionManager,
+      projectId: "my-app",
+    });
+
+    lm.start(5);
+    try {
+      await vi.waitFor(() => {
+        expect(mockSessionManager.send).toHaveBeenCalledTimes(1);
+      });
+      expect(mockSessionManager.send).toHaveBeenCalledWith(
+        "app-orchestrator",
+        expect.stringContaining("Trigger: all-complete"),
+        { requireConfirmation: true },
+      );
+      expect(orchestrator.metadata["lastAllCompleteFingerprint"]).toBe("app-1:merged");
+
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(mockSessionManager.send).toHaveBeenCalledTimes(1);
+
+      const successor = makeSession({
+        id: "app-2",
+        status: "working",
+        metadata: { status: "working" },
+      });
+      sessions = [orchestrator, firstWorker, successor];
+      await vi.waitFor(() => {
+        expect(orchestrator.metadata["lastAllCompleteFingerprint"]).toBeUndefined();
+      });
+
+      successor.status = "merged";
+      successor.runtimeHandle = null;
+      successor.metadata.status = "merged";
+      await vi.waitFor(() => {
+        expect(mockSessionManager.send).toHaveBeenCalledTimes(2);
+      });
+      expect(orchestrator.metadata["lastAllCompleteFingerprint"]).toBe("app-1:merged,app-2:merged");
+    } finally {
+      lm.stop();
+    }
+  });
+
   it("routes send-to-orchestrator reactions to the orchestrator session", async () => {
     config.reactions = {
       "agent-stuck": {

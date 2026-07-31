@@ -224,7 +224,6 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
   const reactionTrackers = new Map<string, ReactionTracker>(); // "sessionId:reactionKey"
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let polling = false; // re-entrancy guard
-  let allCompleteEmitted = false; // guard against repeated all_complete
 
   /** Check if idle time exceeds the agent-stuck threshold. */
   function isIdleBeyondThreshold(session: Session, idleTimestamp: Date): boolean {
@@ -769,17 +768,24 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     reactionTrackers.delete(`${sessionId}:${reactionKey}`);
   }
 
-  function getReactionConfigForSession(
-    session: Session,
+  function getReactionConfigForProject(
+    projectId: string,
     reactionKey: string,
   ): ReactionConfig | null {
-    const project = config.projects[session.projectId];
+    const project = config.projects[projectId];
     const globalReaction = config.reactions[reactionKey];
     const projectReaction = project?.reactions?.[reactionKey];
     const reactionConfig = projectReaction
       ? { ...globalReaction, ...projectReaction }
       : globalReaction;
     return reactionConfig ? (reactionConfig as ReactionConfig) : null;
+  }
+
+  function getReactionConfigForSession(
+    session: Session,
+    reactionKey: string,
+  ): ReactionConfig | null {
+    return getReactionConfigForProject(session.projectId, reactionKey);
   }
 
   function getProjectConfig(projectId: string): ProjectConfig | null {
@@ -1171,11 +1177,6 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
         level: transitionLogLevel(newStatus),
       });
 
-      // Reset allCompleteEmitted when any session becomes active again
-      if (newStatus !== "merged" && newStatus !== "killed") {
-        allCompleteEmitted = false;
-      }
-
       // Clear reaction trackers for the old status so retries reset on state changes
       const oldEventType = statusToEventType(undefined, oldStatus);
       if (oldEventType) {
@@ -1285,23 +1286,57 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
         }
       }
 
-      // Check if all non-orchestrator work is complete (trigger reaction only once)
-      const actionableSessions = sessions.filter((s) => {
-        if (isOrchestratorSession(s)) return false;
-        return !TERMINAL_STATUSES.has(getTrackedStatus(s));
-      });
-      if (sessions.length > 0 && actionableSessions.length === 0 && !allCompleteEmitted) {
-        allCompleteEmitted = true;
+      // Audit each completed worker epoch exactly once. The fingerprint is
+      // persisted on the orchestrator so lifecycle restarts do not re-send the
+      // same completion event. A new actionable worker clears the fingerprint,
+      // allowing the next serial epoch to trigger its own audit.
+      const projectIds = new Set(sessions.map((session) => session.projectId));
+      let actionableSessionCount = 0;
+      for (const projectId of projectIds) {
+        const projectSessions = sessions.filter((session) => session.projectId === projectId);
+        const orchestrator = projectSessions.find(isOrchestratorSession);
+        const workerSessions = projectSessions.filter((session) => !isOrchestratorSession(session));
+        const actionableSessions = workerSessions.filter(
+          (session) => !TERMINAL_STATUSES.has(getTrackedStatus(session)),
+        );
+        actionableSessionCount += actionableSessions.length;
 
-        // Execute all-complete reaction if configured
-        const reactionKey = eventToReactionKey("summary.all_complete");
-        if (reactionKey) {
-          const reactionConfig = config.reactions[reactionKey];
-          if (reactionConfig && reactionConfig.action) {
-            if (reactionConfig.auto !== false || reactionConfig.action === "notify") {
-              await executeReaction("system", "all", reactionKey, reactionConfig as ReactionConfig);
-            }
+        if (actionableSessions.length > 0) {
+          if (orchestrator?.metadata["lastAllCompleteFingerprint"]) {
+            updateSessionMetadata(orchestrator, {
+              lastAllCompleteFingerprint: "",
+              lastAllCompleteAt: "",
+            });
           }
+          continue;
+        }
+        if (workerSessions.length === 0) continue;
+
+        const terminalFingerprint = makeFingerprint(
+          workerSessions.map((session) => `${session.id}:${getTrackedStatus(session)}`),
+        );
+        if (orchestrator?.metadata["lastAllCompleteFingerprint"] === terminalFingerprint) {
+          continue;
+        }
+
+        const reactionKey = eventToReactionKey("summary.all_complete");
+        if (!reactionKey) continue;
+        const reactionConfig = getReactionConfigForProject(projectId, reactionKey);
+        if (
+          !reactionConfig?.action ||
+          (reactionConfig.auto === false && reactionConfig.action !== "notify")
+        ) {
+          continue;
+        }
+
+        const result = await executeReaction("system", projectId, reactionKey, reactionConfig);
+        const targetOrchestrator =
+          orchestrator ?? (result.success ? await ensureOrchestratorSession(projectId) : null);
+        if (result.success && targetOrchestrator) {
+          updateSessionMetadata(targetOrchestrator, {
+            lastAllCompleteFingerprint: terminalFingerprint,
+            lastAllCompleteAt: new Date().toISOString(),
+          });
         }
       }
       if (scopedProjectId) {
@@ -1312,7 +1347,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
           correlationId,
           projectId: scopedProjectId,
           durationMs: Date.now() - startedAt,
-          data: { sessionCount: sessions.length, activeSessionCount: actionableSessions.length },
+          data: { sessionCount: sessions.length, activeSessionCount: actionableSessionCount },
           level: "info",
         });
         observer.setHealth({
@@ -1323,7 +1358,7 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
           details: {
             projectId: scopedProjectId,
             sessionCount: sessions.length,
-            activeSessionCount: actionableSessions.length,
+            activeSessionCount: actionableSessionCount,
           },
         });
       }

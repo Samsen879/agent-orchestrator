@@ -384,8 +384,10 @@ function applyDefaultReactions(config: OrchestratorConfig): OrchestratorConfig {
     },
     "all-complete": {
       auto: true,
-      action: "notify",
-      priority: "info",
+      action: "send-to-orchestrator",
+      message:
+        "All current worker sessions are terminal. Audit the execution chain before stopping: verify post-merge closeout, cleanup, authorized successors, and parent closure. Continue any unfinished work; otherwise record the terminal state once.",
+      priority: "action",
       includeSummary: true,
     },
   };

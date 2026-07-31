@@ -612,7 +612,9 @@ describe("Config Defaults", () => {
       },
     });
 
-    expect(validated.projects.proj1.reactions?.["agent-stuck"]?.action).toBe("send-to-orchestrator");
+    expect(validated.projects.proj1.reactions?.["agent-stuck"]?.action).toBe(
+      "send-to-orchestrator",
+    );
     expect(validated.projects.proj1.reactions?.["ci-failed"]?.escalateTo).toBe("orchestrator");
     expect(validated.projects.proj1.reactions?.["agent-idle"]?.repeatEvery).toBe("45s");
   });
@@ -637,5 +639,6 @@ describe("Config Defaults", () => {
     expect(validated.reactions["merge-conflicts"]?.escalateTo).toBe("orchestrator");
     expect(validated.reactions["agent-idle"]?.escalateTo).toBe("orchestrator");
     expect(validated.reactions["agent-idle"]?.repeatEvery).toBe("8m");
+    expect(validated.reactions["all-complete"]?.action).toBe("send-to-orchestrator");
   });
 });
