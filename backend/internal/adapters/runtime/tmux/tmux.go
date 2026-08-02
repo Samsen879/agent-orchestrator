@@ -880,7 +880,7 @@ func sessionMissingOutput(out string) bool {
 	return strings.Contains(s, "can't find session") ||
 		strings.Contains(s, "no server running") ||
 		(strings.Contains(s, "error connecting") &&
-			strings.Contains(s, "no such file or directory")) ||
+			strings.HasSuffix(strings.TrimSpace(s), "(no such file or directory)")) ||
 		strings.Contains(s, "session not found")
 }
 

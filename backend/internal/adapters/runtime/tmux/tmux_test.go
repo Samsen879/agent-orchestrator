@@ -869,6 +869,7 @@ func TestIsAliveReportsPermissionDeniedAsProbeError(t *testing.T) {
 	for _, output := range []string{
 		"error connecting to /tmp/tmux-1000/default (Operation not permitted)",
 		"error connecting to /tmp/tmux-1000/default (Permission denied)",
+		"error connecting to /tmp/No such file or directory/tmux-1000/default (Permission denied)",
 	} {
 		t.Run(output, func(t *testing.T) {
 			r, fr := newTestRuntime(0)
