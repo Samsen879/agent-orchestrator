@@ -865,6 +865,27 @@ func TestIsAliveReturnsFalseNilOnErrorConnecting(t *testing.T) {
 	}
 }
 
+func TestIsAliveReportsPermissionDeniedAsProbeError(t *testing.T) {
+	for _, output := range []string{
+		"error connecting to /tmp/tmux-1000/default (Operation not permitted)",
+		"error connecting to /tmp/tmux-1000/default (Permission denied)",
+	} {
+		t.Run(output, func(t *testing.T) {
+			r, fr := newTestRuntime(0)
+			fr.outputs = [][]byte{[]byte(output)}
+			fr.err = &exec.ExitError{}
+
+			alive, err := r.IsAlive(context.Background(), ports.RuntimeHandle{ID: "sess-1"})
+			if err == nil {
+				t.Fatal("IsAlive: got nil, want probe error; permission denial must not read as dead")
+			}
+			if alive {
+				t.Fatal("alive = true on permission-denied probe")
+			}
+		})
+	}
+}
+
 // IsAlive must treat any non-"missing" non-zero exit as a probe error so the
 // reaper never reads a transient failure as proof of death.
 func TestIsAliveReportsOtherExitFailuresAsProbeErrors(t *testing.T) {
