@@ -104,19 +104,21 @@ func (s *ActionService) Merge(ctx context.Context, prID string) (MergeResult, er
 	if strings.TrimSpace(latestOwned.HeadSHA) != expectedHead {
 		return MergeResult{}, ErrPRHeadChanged
 	}
-	mutation, err := s.provider.MergePullRequest(ctx, ref, expectedHead)
-	if err != nil {
-		return MergeResult{}, fmt.Errorf("%w: merge mutation: %w", ErrPRProvider, err)
+	mutation, mutationErr := s.provider.MergePullRequest(ctx, ref, expectedHead)
+	readback, readbackErr := s.fetchOne(ctx, ref)
+	if readbackErr != nil {
+		return MergeResult{}, fmt.Errorf("%w: %w", ErrPRMergeMismatch, readbackErr)
 	}
-	if !mutation.Merged || strings.TrimSpace(mutation.MergeCommitSHA) == "" {
-		return MergeResult{}, ErrPRMergeMismatch
+	readbackConfirmed := readback.PR.Merged && readback.PR.HeadSHA == expectedHead &&
+		strings.TrimSpace(readback.PR.MergeCommitSHA) != ""
+	if mutationErr != nil {
+		if readbackConfirmed {
+			return MergeResult{PRNumber: number, Method: "squash", HeadSHA: expectedHead, MergeCommitSHA: readback.PR.MergeCommitSHA}, nil
+		}
+		return MergeResult{}, fmt.Errorf("%w: merge mutation: %w", ErrPRProvider, mutationErr)
 	}
-	readback, err := s.fetchOne(ctx, ref)
-	if err != nil {
-		return MergeResult{}, fmt.Errorf("%w: %w", ErrPRMergeMismatch, err)
-	}
-	if !readback.PR.Merged || readback.PR.HeadSHA != expectedHead ||
-		strings.TrimSpace(readback.PR.MergeCommitSHA) == "" || readback.PR.MergeCommitSHA != mutation.MergeCommitSHA {
+	if !mutation.Merged || strings.TrimSpace(mutation.MergeCommitSHA) == "" || !readbackConfirmed ||
+		readback.PR.MergeCommitSHA != mutation.MergeCommitSHA {
 		return MergeResult{}, ErrPRMergeMismatch
 	}
 	return MergeResult{PRNumber: number, Method: "squash", HeadSHA: expectedHead, MergeCommitSHA: mutation.MergeCommitSHA}, nil

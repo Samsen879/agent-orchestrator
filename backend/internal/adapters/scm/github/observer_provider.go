@@ -166,6 +166,7 @@ func (p *Provider) FetchReviewThreads(ctx context.Context, ref ports.SCMPRRef) (
 		return ports.SCMReviewObservation{Decision: decision, Reviews: reviews, Threads: latest}, nil
 	}
 	out := latest
+	partial := true
 	startCursor := str(pi["startCursor"])
 	// GitHub returns nodes in connection order even when selecting last:N, so
 	// latest[0] is the oldest thread in the latest window. If that boundary
@@ -185,14 +186,15 @@ func (p *Provider) FetchReviewThreads(ctx context.Context, ref ports.SCMPRRef) (
 			combined = append(combined, older...)
 			combined = append(combined, latest...)
 			out = combined
-			if boolv(olderPI["hasPreviousPage"]) {
+			partial = boolv(olderPI["hasPreviousPage"])
+			if partial {
 				p.logger.Warn("github scm: review thread page limit reached",
 					"repo", repoFullName(ref.Repo), "pr", ref.Number,
 					"max_pages", githubReviewThreadMaxPages)
 			}
 		}
 	}
-	return ports.SCMReviewObservation{Decision: decision, Reviews: reviews, Threads: out, Partial: true}, nil
+	return ports.SCMReviewObservation{Decision: decision, Reviews: reviews, Threads: out, Partial: partial}, nil
 }
 
 type restListPull struct {

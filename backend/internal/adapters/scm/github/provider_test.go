@@ -1547,3 +1547,47 @@ func TestFetchReviewThreadsFetchesOneOlderPageWhenOldestUnresolved(t *testing.T)
 		t.Fatalf("threads order = %#v", review.Threads)
 	}
 }
+
+func TestFetchReviewThreadsMarksCompleteWhenOlderPageReachesHistoryStart(t *testing.T) {
+	fake := newFakeGH(t)
+	fake.on(http.MethodPost, "/graphql", func(w http.ResponseWriter, _ *http.Request) {
+		call := fake.callsTo(http.MethodPost, "/graphql")
+		w.Header().Set("Content-Type", "application/json")
+		hasPreviousPage := call == 1
+		id := "older-resolved"
+		resolved := true
+		cursor := ""
+		if call == 1 {
+			id = "latest-unresolved"
+			resolved = false
+			cursor = "latest-start"
+		} else if call != 2 {
+			t.Fatalf("unexpected graphql call %d", call)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{"repo": map[string]any{"pullRequest": map[string]any{
+				"reviewDecision": "APPROVED",
+				"reviewThreads": map[string]any{
+					"nodes": []any{map[string]any{
+						"id": id, "path": "main.go", "line": 1, "isResolved": resolved,
+						"comments": map[string]any{"nodes": []any{}},
+					}},
+					"pageInfo": map[string]any{"hasPreviousPage": hasPreviousPage, "startCursor": cursor},
+				},
+			}}},
+		})
+	})
+	p := newProviderForTest(t, fake)
+	review, err := p.FetchReviewThreads(ctx(), ports.SCMPRRef{
+		Repo: ports.SCMRepo{Provider: "github", Host: "github.com", Owner: "o", Name: "r", Repo: "o/r"}, Number: 1,
+	})
+	if err != nil {
+		t.Fatalf("FetchReviewThreads: %v", err)
+	}
+	if review.Partial {
+		t.Fatal("review Partial = true, want false after older page proved history complete")
+	}
+	if len(review.Threads) != 2 || review.Threads[0].ID != "older-resolved" || review.Threads[1].ID != "latest-unresolved" {
+		t.Fatalf("threads order = %#v", review.Threads)
+	}
+}

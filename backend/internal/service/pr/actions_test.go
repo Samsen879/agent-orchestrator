@@ -27,6 +27,8 @@ func (f *actionFakeStore) GetSession(context.Context, domain.SessionID) (domain.
 type actionFakeProvider struct {
 	observations []ports.SCMObservation
 	fetchErr     error
+	fetchErrors  []error
+	fetchCalls   int
 	review       ports.SCMReviewObservation
 	reviewErr    error
 	mutation     ports.SCMMergeResult
@@ -37,6 +39,11 @@ type actionFakeProvider struct {
 }
 
 func (f *actionFakeProvider) FetchPullRequests(context.Context, []ports.SCMPRRef) ([]ports.SCMObservation, error) {
+	call := f.fetchCalls
+	f.fetchCalls++
+	if call < len(f.fetchErrors) && f.fetchErrors[call] != nil {
+		return nil, f.fetchErrors[call]
+	}
 	if f.fetchErr != nil {
 		return nil, f.fetchErr
 	}
@@ -99,6 +106,28 @@ func TestActionServiceMergeGuardsAndConfirmsLiveOutcome(t *testing.T) {
 	}
 }
 
+func TestActionServiceMergeConfirmsOutcomeAfterIndeterminateMutationError(t *testing.T) {
+	store, provider := actionFixture()
+	provider.mutationErr = errors.New("connection dropped after PUT")
+	provider.mutation = ports.SCMMergeResult{}
+	got, err := NewActionService(store, provider).Merge(context.Background(), "42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.HeadSHA != "head-abc" || got.MergeCommitSHA != "merge-def" || provider.fetchCalls != 2 {
+		t.Fatalf("result = %#v, fetch calls = %d", got, provider.fetchCalls)
+	}
+}
+
+func TestActionServiceMergeReadbackFailureIsMismatch(t *testing.T) {
+	store, provider := actionFixture()
+	provider.fetchErrors = []error{nil, errors.New("readback unavailable")}
+	_, err := NewActionService(store, provider).Merge(context.Background(), "42")
+	if !errors.Is(err, ErrPRMergeMismatch) || !errors.Is(err, ErrPRProvider) {
+		t.Fatalf("err = %v, want merge mismatch carrying provider cause", err)
+	}
+}
+
 func TestActionServiceMergeFailsClosed(t *testing.T) {
 	tests := []struct {
 		name string
@@ -123,7 +152,10 @@ func TestActionServiceMergeFailsClosed(t *testing.T) {
 			p.observations[0].Mergeability.State = string(domain.MergeBlocked)
 		}},
 		{"provider fetch failure", ErrPRProvider, func(_ *actionFakeStore, p *actionFakeProvider) { p.fetchErr = errors.New("offline") }},
-		{"provider mutation failure", ErrPRProvider, func(_ *actionFakeStore, p *actionFakeProvider) { p.mutationErr = errors.New("rejected") }},
+		{"provider mutation failure", ErrPRProvider, func(_ *actionFakeStore, p *actionFakeProvider) {
+			p.mutationErr = errors.New("rejected")
+			p.observations[1] = readyActionObservation(false)
+		}},
 		{"mutation mismatch", ErrPRMergeMismatch, func(_ *actionFakeStore, p *actionFakeProvider) { p.mutation.Merged = false }},
 		{"readback mismatch", ErrPRMergeMismatch, func(_ *actionFakeStore, p *actionFakeProvider) { p.observations[1].PR.MergeCommitSHA = "other" }},
 	}

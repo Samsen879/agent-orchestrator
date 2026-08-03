@@ -82,10 +82,10 @@ func writePRError(w http.ResponseWriter, r *http.Request, err error) {
 		envelope.WriteAPIError(w, r, http.StatusUnprocessableEntity, "unprocessable", "NOTHING_TO_RESOLVE", "No unresolved review threads to resolve", nil)
 	case errors.Is(err, prsvc.ErrPRNotImplemented):
 		apispec.NotImplemented(w, r, r.Method, "/api/v1/prs/{id}/resolve-comments")
-	case errors.Is(err, prsvc.ErrPRProvider):
-		envelope.WriteAPIError(w, r, http.StatusBadGateway, "bad_gateway", "PR_PROVIDER_FAILED", "PR provider operation failed", nil)
 	case errors.Is(err, prsvc.ErrPRMergeMismatch):
 		envelope.WriteAPIError(w, r, http.StatusBadGateway, "bad_gateway", "PR_MERGE_MISMATCH", "PR merge outcome could not be confirmed", nil)
+	case errors.Is(err, prsvc.ErrPRProvider):
+		envelope.WriteAPIError(w, r, http.StatusBadGateway, "bad_gateway", "PR_PROVIDER_FAILED", "PR provider operation failed", nil)
 	default:
 		envelope.WriteAPIError(w, r, http.StatusInternalServerError, "internal", "PR_OPERATION_FAILED", "PR operation failed", nil)
 	}

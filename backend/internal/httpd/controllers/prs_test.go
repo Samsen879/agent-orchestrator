@@ -2,6 +2,7 @@ package controllers_test
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -86,6 +87,14 @@ func TestPRsRoutes_Merge_ProviderAndReadbackFailuresReturn502(t *testing.T) {
 		assertErrorCode(t, body, status, http.StatusBadGateway, tc.code)
 		srv.Close()
 	}
+}
+
+func TestPRsRoutes_Merge_ReadbackMismatchTakesPriorityOverProviderCause(t *testing.T) {
+	err := fmt.Errorf("%w: %w", prsvc.ErrPRMergeMismatch, prsvc.ErrPRProvider)
+	srv := newPRTestServer(t, &fakePRService{mergeErr: err})
+	body, status, headers := doRequest(t, srv, "POST", "/api/v1/prs/42/merge", "")
+	assertJSON(t, headers)
+	assertErrorCode(t, body, status, http.StatusBadGateway, "PR_MERGE_MISMATCH")
 }
 
 // ---- Merge: 404 ----
