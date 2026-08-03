@@ -780,9 +780,11 @@ type PRIDParam struct {
 
 // MergePRResponse is the body of POST /api/v1/prs/{id}/merge (200).
 type MergePRResponse struct {
-	OK       bool   `json:"ok"`
-	PRNumber int    `json:"prNumber"`
-	Method   string `json:"method"`
+	OK             bool   `json:"ok"`
+	PRNumber       int    `json:"prNumber"`
+	Method         string `json:"method"`
+	HeadSHA        string `json:"headSha"`
+	MergeCommitSHA string `json:"mergeCommitSha"`
 }
 
 // ResolveCommentsRequest is the optional body of POST /api/v1/prs/{id}/resolve-comments.

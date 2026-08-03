@@ -14,6 +14,12 @@ import (
 // that found no matching resource, such as a branch with no open pull request.
 var ErrSCMNotFound = errors.New("scm: not found")
 
+// ErrSCMMergeOutcomeUnknown marks a merge mutation whose provider outcome
+// cannot be determined from the response, such as a transport interruption or
+// an unreadable/undecodable success response. Callers may perform a guarded
+// live readback for this error; definitive provider rejections must not wrap it.
+var ErrSCMMergeOutcomeUnknown = errors.New("scm: merge outcome unknown")
+
 // SCMRepo identifies a repository without assuming a provider-specific URL
 // shape. Repo is conventionally "owner/name" for providers that expose an
 // owner namespace, while Owner/Name are kept split for provider calls.
@@ -38,6 +44,21 @@ type SCMPRRef struct {
 	Number int
 	// URL is the canonical browser URL when already known locally.
 	URL string
+}
+
+// SCMMergeResult is the provider's direct response to a guarded pull-request
+// merge mutation. Callers must still read the pull request back before
+// reporting success; a successful mutation response is not outcome evidence.
+type SCMMergeResult struct {
+	Merged         bool
+	MergeCommitSHA string
+	Message        string
+}
+
+// SCMPullRequestMerger performs a provider-side merge guarded by the exact
+// pull-request HEAD the caller just validated.
+type SCMPullRequestMerger interface {
+	MergePullRequest(ctx context.Context, ref SCMPRRef, expectedHead string) (SCMMergeResult, error)
 }
 
 // SCMGuardResult is an ETag-style cache guard result. NotModified maps to HTTP

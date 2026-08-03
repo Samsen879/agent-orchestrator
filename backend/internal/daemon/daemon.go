@@ -207,6 +207,10 @@ func Run() error {
 	}
 	mc := &controllers.MobileController{Bridge: bs}
 	browserService := browsersvc.New(sessionSvc, browserBroker, browserAuthority)
+	prActionSvc, err := newPRActionService(store, log)
+	if err != nil {
+		logSCMProviderDisabled(log, err)
+	}
 
 	// Standalone shell terminals: user-opened shells with no agent session
 	// behind them. They reuse the same runtime adapter (and therefore the same
@@ -247,6 +251,7 @@ func Run() error {
 		Projects:           projectSvc,
 		Agents:             agentSvc,
 		Sessions:           sessionSvc,
+		PRs:                prActionSvc,
 		Reviews:            reviewSvc,
 		Notifications:      notifier,
 		NotificationStream: notificationHub,

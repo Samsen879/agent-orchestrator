@@ -30,6 +30,15 @@ type recordedReq struct {
 	Body   string
 }
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+type failingReadCloser struct{}
+
+func (failingReadCloser) Read([]byte) (int, error) { return 0, errors.New("truncated response") }
+func (failingReadCloser) Close() error             { return nil }
+
 type fakeGH struct {
 	t        *testing.T
 	server   *httptest.Server
@@ -142,6 +151,103 @@ func TestAuthenticatedIdentityClassifiesBot(t *testing.T) {
 	}
 	if got != (ports.SCMIdentity{Login: "ao-bot", Human: false}) {
 		t.Fatalf("identity = %#v", got)
+	}
+}
+
+func TestMergePullRequestSendsExactHeadGuard(t *testing.T) {
+	f := newFakeGH(t)
+	f.on(http.MethodPut, "/repos/acme/widgets/pulls/42/merge", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode merge request: %v", err)
+		}
+		if body["sha"] != "head-abc" || body["merge_method"] != "squash" {
+			t.Fatalf("merge request = %#v, want exact sha and squash", body)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"merged": true, "sha": "merge-def", "message": "merged"})
+	})
+	p := newProviderForTest(t, f)
+	ref := ports.SCMPRRef{Repo: ports.SCMRepo{Owner: "acme", Name: "widgets"}, Number: 42}
+	got, err := p.MergePullRequest(ctx(), ref, "head-abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Merged || got.MergeCommitSHA != "merge-def" {
+		t.Fatalf("merge result = %#v", got)
+	}
+}
+
+func TestMergePullRequestRejectsMissingExpectedHeadWithoutMutation(t *testing.T) {
+	f := newFakeGH(t)
+	p := newProviderForTest(t, f)
+	ref := ports.SCMPRRef{Repo: ports.SCMRepo{Owner: "acme", Name: "widgets"}, Number: 42}
+	if _, err := p.MergePullRequest(ctx(), ref, " "); err == nil {
+		t.Fatal("missing expected head unexpectedly accepted")
+	}
+	if len(f.calls()) != 0 {
+		t.Fatalf("provider made %d calls, want none", len(f.calls()))
+	}
+}
+
+func TestMergePullRequestDefinitiveHTTPRejectionIsNotAmbiguous(t *testing.T) {
+	for _, status := range []int{http.StatusForbidden, http.StatusMethodNotAllowed, http.StatusConflict} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			f := newFakeGH(t)
+			f.on(http.MethodPut, "/repos/acme/widgets/pulls/42/merge", func(w http.ResponseWriter, _ *http.Request) {
+				http.Error(w, `{"message":"merge rejected"}`, status)
+			})
+			p := newProviderForTest(t, f)
+			ref := ports.SCMPRRef{Repo: ports.SCMRepo{Owner: "acme", Name: "widgets"}, Number: 42}
+			_, err := p.MergePullRequest(ctx(), ref, "head-abc")
+			if err == nil || errors.Is(err, ports.ErrSCMMergeOutcomeUnknown) {
+				t.Fatalf("err = %v, want definitive provider rejection", err)
+			}
+		})
+	}
+}
+
+func TestMergePullRequestUndecodableSuccessIsAmbiguous(t *testing.T) {
+	f := newFakeGH(t)
+	f.on(http.MethodPut, "/repos/acme/widgets/pulls/42/merge", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("not-json"))
+	})
+	p := newProviderForTest(t, f)
+	ref := ports.SCMPRRef{Repo: ports.SCMRepo{Owner: "acme", Name: "widgets"}, Number: 42}
+	_, err := p.MergePullRequest(ctx(), ref, "head-abc")
+	if !errors.Is(err, ports.ErrSCMMergeOutcomeUnknown) {
+		t.Fatalf("err = %v, want ambiguous merge outcome", err)
+	}
+}
+
+func TestMergePullRequestReadFailureUsesKnownStatus(t *testing.T) {
+	tests := []struct {
+		name          string
+		status        int
+		wantAmbiguous bool
+	}{
+		{name: "non-2xx is definitive", status: http.StatusConflict},
+		{name: "2xx is ambiguous", status: http.StatusOK, wantAmbiguous: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			httpClient := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: tt.status,
+					Header:     make(http.Header),
+					Body:       failingReadCloser{},
+					Request:    req,
+				}, nil
+			})}
+			p, err := NewProvider(ProviderOptions{Client: NewClient(ClientOptions{HTTPClient: httpClient, RESTBase: "https://example.test"})})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ref := ports.SCMPRRef{Repo: ports.SCMRepo{Owner: "acme", Name: "widgets"}, Number: 42}
+			_, err = p.MergePullRequest(ctx(), ref, "head-abc")
+			if err == nil || errors.Is(err, ports.ErrSCMMergeOutcomeUnknown) != tt.wantAmbiguous {
+				t.Fatalf("err = %v, ambiguous = %t, want %t", err, errors.Is(err, ports.ErrSCMMergeOutcomeUnknown), tt.wantAmbiguous)
+			}
+		})
 	}
 }
 
@@ -1509,6 +1615,50 @@ func TestFetchReviewThreadsFetchesOneOlderPageWhenOldestUnresolved(t *testing.T)
 		t.Fatalf("review Partial = false, want true because pagination remains bounded")
 	}
 	if len(review.Threads) != 2 || review.Threads[0].ID != "older" || review.Threads[1].ID != "latest-unresolved" {
+		t.Fatalf("threads order = %#v", review.Threads)
+	}
+}
+
+func TestFetchReviewThreadsMarksCompleteWhenOlderPageReachesHistoryStart(t *testing.T) {
+	fake := newFakeGH(t)
+	fake.on(http.MethodPost, "/graphql", func(w http.ResponseWriter, _ *http.Request) {
+		call := fake.callsTo(http.MethodPost, "/graphql")
+		w.Header().Set("Content-Type", "application/json")
+		hasPreviousPage := call == 1
+		id := "older-resolved"
+		resolved := true
+		cursor := ""
+		if call == 1 {
+			id = "latest-unresolved"
+			resolved = false
+			cursor = "latest-start"
+		} else if call != 2 {
+			t.Fatalf("unexpected graphql call %d", call)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": map[string]any{"repo": map[string]any{"pullRequest": map[string]any{
+				"reviewDecision": "APPROVED",
+				"reviewThreads": map[string]any{
+					"nodes": []any{map[string]any{
+						"id": id, "path": "main.go", "line": 1, "isResolved": resolved,
+						"comments": map[string]any{"nodes": []any{}},
+					}},
+					"pageInfo": map[string]any{"hasPreviousPage": hasPreviousPage, "startCursor": cursor},
+				},
+			}}},
+		})
+	})
+	p := newProviderForTest(t, fake)
+	review, err := p.FetchReviewThreads(ctx(), ports.SCMPRRef{
+		Repo: ports.SCMRepo{Provider: "github", Host: "github.com", Owner: "o", Name: "r", Repo: "o/r"}, Number: 1,
+	})
+	if err != nil {
+		t.Fatalf("FetchReviewThreads: %v", err)
+	}
+	if review.Partial {
+		t.Fatal("review Partial = true, want false after older page proved history complete")
+	}
+	if len(review.Threads) != 2 || review.Threads[0].ID != "older-resolved" || review.Threads[1].ID != "latest-unresolved" {
 		t.Fatalf("threads order = %#v", review.Threads)
 	}
 }
