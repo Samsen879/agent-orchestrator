@@ -122,6 +122,38 @@ func (p *Provider) AuthenticatedIdentity(ctx context.Context) (ports.SCMIdentity
 	return p.identity, nil
 }
 
+// MergePullRequest squash-merges one pull request while asking GitHub to reject
+// the mutation if its HEAD no longer matches expectedHead. The caller must
+// independently read the PR back before treating the operation as successful.
+func (p *Provider) MergePullRequest(ctx context.Context, ref ports.SCMPRRef, expectedHead string) (ports.SCMMergeResult, error) {
+	expectedHead = strings.TrimSpace(expectedHead)
+	if ref.Number <= 0 || strings.TrimSpace(ref.Repo.Owner) == "" || strings.TrimSpace(ref.Repo.Name) == "" {
+		return ports.SCMMergeResult{}, errors.New("github scm: invalid pull request reference")
+	}
+	if expectedHead == "" {
+		return ports.SCMMergeResult{}, errors.New("github scm: expected head sha is required")
+	}
+	resp, err := p.client.doREST(ctx, http.MethodPut,
+		repoPath(ref.Repo.Owner, ref.Repo.Name, "pulls", strconv.Itoa(ref.Number), "merge"), nil,
+		map[string]string{"merge_method": "squash", "sha": expectedHead})
+	if err != nil {
+		return ports.SCMMergeResult{}, err
+	}
+	var result struct {
+		SHA     string `json:"sha"`
+		Merged  bool   `json:"merged"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(resp.Body, &result); err != nil {
+		return ports.SCMMergeResult{}, fmt.Errorf("github scm: decode merge response: %w", err)
+	}
+	return ports.SCMMergeResult{
+		Merged:         result.Merged,
+		MergeCommitSHA: strings.TrimSpace(result.SHA),
+		Message:        result.Message,
+	}, nil
+}
+
 // Observe fetches the current state of one PR by its github.com URL and
 // returns a normalized ports.PRObservation. Any required network call
 // failing yields Fetched=false (caller must not infer "PR closed" from a

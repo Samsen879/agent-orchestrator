@@ -11,9 +11,11 @@ import (
 )
 
 type mergePRResponse struct {
-	OK       bool   `json:"ok"`
-	PRNumber int    `json:"prNumber"`
-	Method   string `json:"method"`
+	OK             bool   `json:"ok"`
+	PRNumber       int    `json:"prNumber"`
+	Method         string `json:"method"`
+	HeadSHA        string `json:"headSha"`
+	MergeCommitSHA string `json:"mergeCommitSha"`
 }
 
 type resolveCommentsRequest struct {
@@ -50,7 +52,8 @@ func newPRMergeCommand(ctx *commandContext) *cobra.Command {
 				return err
 			}
 			if method := strings.TrimSpace(res.Method); method != "" {
-				_, err = fmt.Fprintf(cmd.OutOrStdout(), "merged PR #%d using %s\n", res.PRNumber, method)
+				_, err = fmt.Fprintf(cmd.OutOrStdout(), "merged PR #%d using %s (head %s, merge commit %s)\n",
+					res.PRNumber, method, res.HeadSHA, res.MergeCommitSHA)
 				return err
 			}
 			_, err = fmt.Fprintf(cmd.OutOrStdout(), "merged PR #%d\n", res.PRNumber)

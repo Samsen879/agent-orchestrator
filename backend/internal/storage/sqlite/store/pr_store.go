@@ -254,6 +254,21 @@ func (s *Store) ListPRsBySession(ctx context.Context, sessionID domain.SessionID
 	return out, nil
 }
 
+// ListPRsByNumber returns every AO-owned PR with the provider-local number.
+// More than one row is intentionally possible because different repositories
+// share number spaces; action services must reject that ambiguity.
+func (s *Store) ListPRsByNumber(ctx context.Context, number int) ([]domain.PullRequest, error) {
+	rows, err := s.qr.ListPRsByNumber(ctx, int64(number))
+	if err != nil {
+		return nil, fmt.Errorf("list prs numbered %d: %w", number, err)
+	}
+	out := make([]domain.PullRequest, 0, len(rows))
+	for _, p := range rows {
+		out = append(out, prRowFromGen(p))
+	}
+	return out, nil
+}
+
 // ListChecks returns every recorded check run for a PR.
 func (s *Store) ListChecks(ctx context.Context, prURL string) ([]domain.PullRequestCheck, error) {
 	rows, err := s.qr.ListChecksByPR(ctx, prURL)

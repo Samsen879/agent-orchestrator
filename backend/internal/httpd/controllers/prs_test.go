@@ -55,7 +55,7 @@ func TestPRsRoutes_NilService_ResolveCommentsReturns501(t *testing.T) {
 // ---- Merge: 200 ----
 
 func TestPRsRoutes_Merge_200(t *testing.T) {
-	svc := &fakePRService{mergeResult: prsvc.MergeResult{PRNumber: 42, Method: "squash"}}
+	svc := &fakePRService{mergeResult: prsvc.MergeResult{PRNumber: 42, Method: "squash", HeadSHA: "head-abc", MergeCommitSHA: "merge-def"}}
 	srv := newPRTestServer(t, svc)
 
 	body, status, _ := doRequest(t, srv, "POST", "/api/v1/prs/42/merge", "")
@@ -63,13 +63,28 @@ func TestPRsRoutes_Merge_200(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body=%s", status, body)
 	}
 	var resp struct {
-		OK       bool   `json:"ok"`
-		PRNumber int    `json:"prNumber"`
-		Method   string `json:"method"`
+		OK             bool   `json:"ok"`
+		PRNumber       int    `json:"prNumber"`
+		Method         string `json:"method"`
+		HeadSHA        string `json:"headSha"`
+		MergeCommitSHA string `json:"mergeCommitSha"`
 	}
 	mustJSON(t, body, &resp)
-	if !resp.OK || resp.PRNumber != 42 || resp.Method != "squash" {
+	if !resp.OK || resp.PRNumber != 42 || resp.Method != "squash" || resp.HeadSHA != "head-abc" || resp.MergeCommitSHA != "merge-def" {
 		t.Errorf("resp = %+v, want {ok:true prNumber:42 method:squash}", resp)
+	}
+}
+
+func TestPRsRoutes_Merge_ProviderAndReadbackFailuresReturn502(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		code string
+	}{{prsvc.ErrPRProvider, "PR_PROVIDER_FAILED"}, {prsvc.ErrPRMergeMismatch, "PR_MERGE_MISMATCH"}} {
+		srv := newPRTestServer(t, &fakePRService{mergeErr: tc.err})
+		body, status, headers := doRequest(t, srv, "POST", "/api/v1/prs/42/merge", "")
+		assertJSON(t, headers)
+		assertErrorCode(t, body, status, http.StatusBadGateway, tc.code)
+		srv.Close()
 	}
 }
 

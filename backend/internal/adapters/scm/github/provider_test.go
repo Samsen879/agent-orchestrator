@@ -145,6 +145,41 @@ func TestAuthenticatedIdentityClassifiesBot(t *testing.T) {
 	}
 }
 
+func TestMergePullRequestSendsExactHeadGuard(t *testing.T) {
+	f := newFakeGH(t)
+	f.on(http.MethodPut, "/repos/acme/widgets/pulls/42/merge", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode merge request: %v", err)
+		}
+		if body["sha"] != "head-abc" || body["merge_method"] != "squash" {
+			t.Fatalf("merge request = %#v, want exact sha and squash", body)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"merged": true, "sha": "merge-def", "message": "merged"})
+	})
+	p := newProviderForTest(t, f)
+	ref := ports.SCMPRRef{Repo: ports.SCMRepo{Owner: "acme", Name: "widgets"}, Number: 42}
+	got, err := p.MergePullRequest(ctx(), ref, "head-abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Merged || got.MergeCommitSHA != "merge-def" {
+		t.Fatalf("merge result = %#v", got)
+	}
+}
+
+func TestMergePullRequestRejectsMissingExpectedHeadWithoutMutation(t *testing.T) {
+	f := newFakeGH(t)
+	p := newProviderForTest(t, f)
+	ref := ports.SCMPRRef{Repo: ports.SCMRepo{Owner: "acme", Name: "widgets"}, Number: 42}
+	if _, err := p.MergePullRequest(ctx(), ref, " "); err == nil {
+		t.Fatal("missing expected head unexpectedly accepted")
+	}
+	if len(f.calls()) != 0 {
+		t.Fatalf("provider made %d calls, want none", len(f.calls()))
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Fixture builders. Each test composes a REST pull + GraphQL response so
 // it can pin the exact shape it cares about without sharing global state

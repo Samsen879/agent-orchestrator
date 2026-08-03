@@ -9,7 +9,7 @@ import (
 
 func TestPRMergePostsToDaemon(t *testing.T) {
 	cfg := setConfigEnv(t)
-	srv, capture := reviewServer(t, http.StatusOK, `{"ok":true,"prNumber":42,"method":"squash"}`)
+	srv, capture := reviewServer(t, http.StatusOK, `{"ok":true,"prNumber":42,"method":"squash","headSha":"head-abc","mergeCommitSha":"merge-def"}`)
 	writeRunFileFor(t, cfg, srv)
 
 	out, errOut, err := executeCLI(t, aliveDeps(), "pr", "merge", "#42")
@@ -22,7 +22,7 @@ func TestPRMergePostsToDaemon(t *testing.T) {
 	if strings.TrimSpace(capture.body) != "{}" {
 		t.Fatalf("body = %q, want {}", capture.body)
 	}
-	if !strings.Contains(out, "merged PR #42 using squash") {
+	if !strings.Contains(out, "merged PR #42 using squash (head head-abc, merge commit merge-def)") {
 		t.Fatalf("stdout = %q", out)
 	}
 }

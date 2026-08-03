@@ -1092,6 +1092,8 @@ export interface components {
             status: "read";
         };
         MergePRResponse: {
+            headSha: string;
+            mergeCommitSha: string;
             method: string;
             ok: boolean;
             prNumber: number;
@@ -2971,6 +2973,15 @@ export interface operations {
             };
             /** @description Not Implemented */
             501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Bad Gateway */
+            502: {
                 headers: {
                     [name: string]: unknown;
                 };

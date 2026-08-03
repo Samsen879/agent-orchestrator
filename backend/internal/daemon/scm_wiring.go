@@ -12,6 +12,7 @@ import (
 	scmgithub "github.com/aoagents/agent-orchestrator/backend/internal/adapters/scm/github"
 	"github.com/aoagents/agent-orchestrator/backend/internal/lifecycle"
 	scmobserve "github.com/aoagents/agent-orchestrator/backend/internal/observe/scm"
+	prsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/pr"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite"
 )
 
@@ -42,6 +43,14 @@ func newGitHubSCMProvider(logger *slog.Logger) (*scmgithub.Provider, error) {
 	// readiness path. Provider calls resolve credentials lazily when claim-pr or
 	// the background observer actually needs GitHub.
 	return scmgithub.NewProvider(scmgithub.ProviderOptions{Token: tokens, SkipTokenPreflight: true, Logger: logger})
+}
+
+func newPRActionService(store *sqlite.Store, logger *slog.Logger) (prsvc.ActionManager, error) {
+	provider, err := newGitHubSCMProvider(logger)
+	if err != nil {
+		return nil, err
+	}
+	return prsvc.NewActionService(store, provider), nil
 }
 
 func logSCMProviderDisabled(logger *slog.Logger, err error) {

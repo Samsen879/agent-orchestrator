@@ -34,7 +34,10 @@ func (c *PRsController) merge(w http.ResponseWriter, r *http.Request) {
 		writePRError(w, r, err)
 		return
 	}
-	envelope.WriteJSON(w, http.StatusOK, MergePRResponse{OK: true, PRNumber: res.PRNumber, Method: res.Method})
+	envelope.WriteJSON(w, http.StatusOK, MergePRResponse{
+		OK: true, PRNumber: res.PRNumber, Method: res.Method,
+		HeadSHA: res.HeadSHA, MergeCommitSHA: res.MergeCommitSHA,
+	})
 }
 
 func (c *PRsController) resolveComments(w http.ResponseWriter, r *http.Request) {
@@ -65,12 +68,24 @@ func writePRError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, prsvc.ErrPRNotFound):
 		envelope.WriteAPIError(w, r, http.StatusNotFound, "not_found", "PR_NOT_FOUND", "Unknown PR", nil)
+	case errors.Is(err, prsvc.ErrPRAmbiguous):
+		envelope.WriteAPIError(w, r, http.StatusConflict, "conflict", "PR_OWNERSHIP_AMBIGUOUS", "PR number is owned ambiguously", nil)
+	case errors.Is(err, prsvc.ErrPROwnerInactive):
+		envelope.WriteAPIError(w, r, http.StatusConflict, "conflict", "PR_OWNER_INACTIVE", "PR owner is inactive", nil)
+	case errors.Is(err, prsvc.ErrPRHeadChanged):
+		envelope.WriteAPIError(w, r, http.StatusConflict, "conflict", "PR_HEAD_CHANGED", "PR head changed", nil)
 	case errors.Is(err, prsvc.ErrPRNotMergeable):
 		envelope.WriteAPIError(w, r, http.StatusConflict, "conflict", "PR_NOT_MERGEABLE", "PR is not mergeable", nil)
 	case errors.Is(err, prsvc.ErrPRPreconditions):
 		envelope.WriteAPIError(w, r, http.StatusUnprocessableEntity, "unprocessable", "PR_PRECONDITIONS_UNMET", "PR merge preconditions are not met", nil)
 	case errors.Is(err, prsvc.ErrNothingToResolve):
 		envelope.WriteAPIError(w, r, http.StatusUnprocessableEntity, "unprocessable", "NOTHING_TO_RESOLVE", "No unresolved review threads to resolve", nil)
+	case errors.Is(err, prsvc.ErrPRNotImplemented):
+		apispec.NotImplemented(w, r, r.Method, "/api/v1/prs/{id}/resolve-comments")
+	case errors.Is(err, prsvc.ErrPRProvider):
+		envelope.WriteAPIError(w, r, http.StatusBadGateway, "bad_gateway", "PR_PROVIDER_FAILED", "PR provider operation failed", nil)
+	case errors.Is(err, prsvc.ErrPRMergeMismatch):
+		envelope.WriteAPIError(w, r, http.StatusBadGateway, "bad_gateway", "PR_MERGE_MISMATCH", "PR merge outcome could not be confirmed", nil)
 	default:
 		envelope.WriteAPIError(w, r, http.StatusInternalServerError, "internal", "PR_OPERATION_FAILED", "PR operation failed", nil)
 	}

@@ -1054,6 +1054,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/APIError'
           description: Not Implemented
+        "502":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Gateway
       summary: Squash-merge a pull request
       tags:
       - prs
@@ -3152,6 +3158,10 @@ components:
       type: object
     MergePRResponse:
       properties:
+        headSha:
+          type: string
+        mergeCommitSha:
+          type: string
         method:
           type: string
         ok:
@@ -3162,6 +3172,8 @@ components:
       - ok
       - prNumber
       - method
+      - headSha
+      - mergeCommitSha
       type: object
     MobileStatusResponse:
       properties:

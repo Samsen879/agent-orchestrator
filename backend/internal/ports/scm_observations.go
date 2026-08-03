@@ -40,6 +40,21 @@ type SCMPRRef struct {
 	URL string
 }
 
+// SCMMergeResult is the provider's direct response to a guarded pull-request
+// merge mutation. Callers must still read the pull request back before
+// reporting success; a successful mutation response is not outcome evidence.
+type SCMMergeResult struct {
+	Merged         bool
+	MergeCommitSHA string
+	Message        string
+}
+
+// SCMPullRequestMerger performs a provider-side merge guarded by the exact
+// pull-request HEAD the caller just validated.
+type SCMPullRequestMerger interface {
+	MergePullRequest(ctx context.Context, ref SCMPRRef, expectedHead string) (SCMMergeResult, error)
+}
+
 // SCMGuardResult is an ETag-style cache guard result. NotModified maps to HTTP
 // 304 for providers that support it.
 type SCMGuardResult struct {

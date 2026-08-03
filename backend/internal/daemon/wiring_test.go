@@ -201,6 +201,22 @@ func TestWiring_StartSessionBuildsSessionService(t *testing.T) {
 	}
 }
 
+func TestWiring_PRActionServiceIsProductionBacked(t *testing.T) {
+	store, err := sqlite.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	svc, err := newPRActionService(store, log)
+	if err != nil {
+		t.Fatalf("newPRActionService: %v", err)
+	}
+	if svc == nil {
+		t.Fatal("newPRActionService returned nil; merge route would remain a 501 stub")
+	}
+}
+
 func TestWiring_StartSessionSpawnsScratchWithoutGitRepo(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlite.Open(t.TempDir())

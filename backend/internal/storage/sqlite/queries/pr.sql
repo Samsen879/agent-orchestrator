@@ -87,6 +87,11 @@ SELECT * FROM pr
 WHERE session_id = ?
 ORDER BY updated_at DESC;
 
+-- name: ListPRsByNumber :many
+SELECT * FROM pr
+WHERE number = ?
+ORDER BY updated_at DESC;
+
 -- name: GetPRLastNudgeSignature :one
 SELECT last_nudge_signature FROM pr WHERE url = ?;
 
