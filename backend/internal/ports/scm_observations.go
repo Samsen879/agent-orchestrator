@@ -14,6 +14,12 @@ import (
 // that found no matching resource, such as a branch with no open pull request.
 var ErrSCMNotFound = errors.New("scm: not found")
 
+// ErrSCMMergeOutcomeUnknown marks a merge mutation whose provider outcome
+// cannot be determined from the response, such as a transport interruption or
+// an unreadable/undecodable success response. Callers may perform a guarded
+// live readback for this error; definitive provider rejections must not wrap it.
+var ErrSCMMergeOutcomeUnknown = errors.New("scm: merge outcome unknown")
+
 // SCMRepo identifies a repository without assuming a provider-specific URL
 // shape. Repo is conventionally "owner/name" for providers that expose an
 // owner namespace, while Owner/Name are kept split for provider calls.

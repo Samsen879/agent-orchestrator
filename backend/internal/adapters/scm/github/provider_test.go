@@ -180,6 +180,36 @@ func TestMergePullRequestRejectsMissingExpectedHeadWithoutMutation(t *testing.T)
 	}
 }
 
+func TestMergePullRequestDefinitiveHTTPRejectionIsNotAmbiguous(t *testing.T) {
+	for _, status := range []int{http.StatusForbidden, http.StatusMethodNotAllowed, http.StatusConflict} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			f := newFakeGH(t)
+			f.on(http.MethodPut, "/repos/acme/widgets/pulls/42/merge", func(w http.ResponseWriter, _ *http.Request) {
+				http.Error(w, `{"message":"merge rejected"}`, status)
+			})
+			p := newProviderForTest(t, f)
+			ref := ports.SCMPRRef{Repo: ports.SCMRepo{Owner: "acme", Name: "widgets"}, Number: 42}
+			_, err := p.MergePullRequest(ctx(), ref, "head-abc")
+			if err == nil || errors.Is(err, ports.ErrSCMMergeOutcomeUnknown) {
+				t.Fatalf("err = %v, want definitive provider rejection", err)
+			}
+		})
+	}
+}
+
+func TestMergePullRequestUndecodableSuccessIsAmbiguous(t *testing.T) {
+	f := newFakeGH(t)
+	f.on(http.MethodPut, "/repos/acme/widgets/pulls/42/merge", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("not-json"))
+	})
+	p := newProviderForTest(t, f)
+	ref := ports.SCMPRRef{Repo: ports.SCMRepo{Owner: "acme", Name: "widgets"}, Number: 42}
+	_, err := p.MergePullRequest(ctx(), ref, "head-abc")
+	if !errors.Is(err, ports.ErrSCMMergeOutcomeUnknown) {
+		t.Fatalf("err = %v, want ambiguous merge outcome", err)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Fixture builders. Each test composes a REST pull + GraphQL response so
 // it can pin the exact shape it cares about without sharing global state

@@ -137,6 +137,10 @@ func (p *Provider) MergePullRequest(ctx context.Context, ref ports.SCMPRRef, exp
 		repoPath(ref.Repo.Owner, ref.Repo.Name, "pulls", strconv.Itoa(ref.Number), "merge"), nil,
 		map[string]string{"merge_method": "squash", "sha": expectedHead})
 	if err != nil {
+		var transportErr *url.Error
+		if errors.As(err, &transportErr) || errors.Is(err, errRESTResponseRead) {
+			return ports.SCMMergeResult{}, fmt.Errorf("%w: merge request: %w", ports.ErrSCMMergeOutcomeUnknown, err)
+		}
 		return ports.SCMMergeResult{}, err
 	}
 	var result struct {
@@ -145,7 +149,7 @@ func (p *Provider) MergePullRequest(ctx context.Context, ref ports.SCMPRRef, exp
 		Message string `json:"message"`
 	}
 	if err := json.Unmarshal(resp.Body, &result); err != nil {
-		return ports.SCMMergeResult{}, fmt.Errorf("github scm: decode merge response: %w", err)
+		return ports.SCMMergeResult{}, fmt.Errorf("%w: decode merge response: %w", ports.ErrSCMMergeOutcomeUnknown, err)
 	}
 	return ports.SCMMergeResult{
 		Merged:         result.Merged,

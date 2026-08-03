@@ -27,9 +27,10 @@ const (
 // errors.Is; the orchestrator's lifecycle code is intentionally insulated
 // from raw HTTP status codes.
 var (
-	ErrNotFound    = ports.ErrSCMNotFound
-	ErrAuthFailed  = errors.New("github scm: authentication failed")
-	ErrRateLimited = errors.New("github scm: rate limited")
+	ErrNotFound         = ports.ErrSCMNotFound
+	ErrAuthFailed       = errors.New("github scm: authentication failed")
+	ErrRateLimited      = errors.New("github scm: rate limited")
+	errRESTResponseRead = errors.New("github scm: response read failed")
 )
 
 // RateLimitError carries the structured backoff hints from a rate-limit
@@ -240,7 +241,7 @@ func (c *Client) doREST(ctx context.Context, method, path string, q url.Values, 
 
 	b, readErr := io.ReadAll(resp.Body)
 	if readErr != nil {
-		return RESTResponse{}, fmt.Errorf("github scm: read %s body: %w", path, readErr)
+		return RESTResponse{}, fmt.Errorf("%w for %s: %w", errRESTResponseRead, path, readErr)
 	}
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {

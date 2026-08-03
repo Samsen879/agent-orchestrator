@@ -2,6 +2,7 @@ package pr
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -105,6 +106,9 @@ func (s *ActionService) Merge(ctx context.Context, prID string) (MergeResult, er
 		return MergeResult{}, ErrPRHeadChanged
 	}
 	mutation, mutationErr := s.provider.MergePullRequest(ctx, ref, expectedHead)
+	if mutationErr != nil && !errors.Is(mutationErr, ports.ErrSCMMergeOutcomeUnknown) {
+		return MergeResult{}, fmt.Errorf("%w: merge mutation: %w", ErrPRProvider, mutationErr)
+	}
 	readback, readbackErr := s.fetchOne(ctx, ref)
 	if readbackErr != nil {
 		return MergeResult{}, fmt.Errorf("%w: %w", ErrPRMergeMismatch, readbackErr)

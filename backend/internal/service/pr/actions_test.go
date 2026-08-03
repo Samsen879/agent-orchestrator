@@ -108,7 +108,7 @@ func TestActionServiceMergeGuardsAndConfirmsLiveOutcome(t *testing.T) {
 
 func TestActionServiceMergeConfirmsOutcomeAfterIndeterminateMutationError(t *testing.T) {
 	store, provider := actionFixture()
-	provider.mutationErr = errors.New("connection dropped after PUT")
+	provider.mutationErr = errors.Join(ports.ErrSCMMergeOutcomeUnknown, errors.New("connection dropped after PUT"))
 	provider.mutation = ports.SCMMergeResult{}
 	got, err := NewActionService(store, provider).Merge(context.Background(), "42")
 	if err != nil {
@@ -116,6 +116,19 @@ func TestActionServiceMergeConfirmsOutcomeAfterIndeterminateMutationError(t *tes
 	}
 	if got.HeadSHA != "head-abc" || got.MergeCommitSHA != "merge-def" || provider.fetchCalls != 2 {
 		t.Fatalf("result = %#v, fetch calls = %d", got, provider.fetchCalls)
+	}
+}
+
+func TestActionServiceMergeRejectsDefinitiveMutationErrorDespiteConcurrentMerge(t *testing.T) {
+	store, provider := actionFixture()
+	provider.mutationErr = errors.New("github rejected merge with 409")
+	provider.mutation = ports.SCMMergeResult{}
+	_, err := NewActionService(store, provider).Merge(context.Background(), "42")
+	if !errors.Is(err, ErrPRProvider) {
+		t.Fatalf("err = %v, want provider failure", err)
+	}
+	if provider.fetchCalls != 1 {
+		t.Fatalf("fetch calls = %d, want preflight only; concurrent merged readback must not recover a rejection", provider.fetchCalls)
 	}
 }
 
