@@ -241,6 +241,13 @@ func (c *Client) doREST(ctx context.Context, method, path string, q url.Values, 
 
 	b, readErr := io.ReadAll(resp.Body)
 	if readErr != nil {
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			err = classifyError(resp, b)
+			if errors.Is(err, ErrAuthFailed) {
+				c.invalidateToken()
+			}
+			return RESTResponse{StatusCode: resp.StatusCode, Body: b}, err
+		}
 		return RESTResponse{}, fmt.Errorf("%w for %s: %w", errRESTResponseRead, path, readErr)
 	}
 

@@ -30,6 +30,15 @@ type recordedReq struct {
 	Body   string
 }
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+type failingReadCloser struct{}
+
+func (failingReadCloser) Read([]byte) (int, error) { return 0, errors.New("truncated response") }
+func (failingReadCloser) Close() error             { return nil }
+
 type fakeGH struct {
 	t        *testing.T
 	server   *httptest.Server
@@ -207,6 +216,38 @@ func TestMergePullRequestUndecodableSuccessIsAmbiguous(t *testing.T) {
 	_, err := p.MergePullRequest(ctx(), ref, "head-abc")
 	if !errors.Is(err, ports.ErrSCMMergeOutcomeUnknown) {
 		t.Fatalf("err = %v, want ambiguous merge outcome", err)
+	}
+}
+
+func TestMergePullRequestReadFailureUsesKnownStatus(t *testing.T) {
+	tests := []struct {
+		name          string
+		status        int
+		wantAmbiguous bool
+	}{
+		{name: "non-2xx is definitive", status: http.StatusConflict},
+		{name: "2xx is ambiguous", status: http.StatusOK, wantAmbiguous: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			httpClient := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: tt.status,
+					Header:     make(http.Header),
+					Body:       failingReadCloser{},
+					Request:    req,
+				}, nil
+			})}
+			p, err := NewProvider(ProviderOptions{Client: NewClient(ClientOptions{HTTPClient: httpClient, RESTBase: "https://example.test"})})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ref := ports.SCMPRRef{Repo: ports.SCMRepo{Owner: "acme", Name: "widgets"}, Number: 42}
+			_, err = p.MergePullRequest(ctx(), ref, "head-abc")
+			if err == nil || errors.Is(err, ports.ErrSCMMergeOutcomeUnknown) != tt.wantAmbiguous {
+				t.Fatalf("err = %v, ambiguous = %t, want %t", err, errors.Is(err, ports.ErrSCMMergeOutcomeUnknown), tt.wantAmbiguous)
+			}
+		})
 	}
 }
 
