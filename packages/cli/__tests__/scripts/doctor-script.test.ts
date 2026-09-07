@@ -31,15 +31,15 @@ function createHealthyRepo(tempRoot: string): string {
   mkdirSync(join(fakeRepo, "node_modules"), { recursive: true });
   mkdirSync(join(fakeRepo, "packages", "core", "dist"), { recursive: true });
   mkdirSync(join(fakeRepo, "packages", "cli", "dist"), { recursive: true });
-  mkdirSync(join(fakeRepo, "packages", "agent-orchestrator", "bin"), { recursive: true });
+  mkdirSync(join(fakeRepo, "packages", "ao", "bin"), { recursive: true });
   mkdirSync(join(fakeRepo, "packages", "web"), { recursive: true });
   writeFileSync(join(fakeRepo, "packages", "core", "dist", "index.js"), "export {};\n");
   writeFileSync(join(fakeRepo, "packages", "cli", "dist", "index.js"), "export {};\n");
   writeFileSync(
-    join(fakeRepo, "packages", "agent-orchestrator", "bin", "ao.js"),
+    join(fakeRepo, "packages", "ao", "bin", "ao.js"),
     '#!/usr/bin/env node\nconsole.log("0.1.0");\n',
   );
-  chmodSync(join(fakeRepo, "packages", "agent-orchestrator", "bin", "ao.js"), 0o755);
+  chmodSync(join(fakeRepo, "packages", "ao", "bin", "ao.js"), 0o755);
   return fakeRepo;
 }
 
@@ -149,7 +149,7 @@ describe("scripts/ao-doctor.sh", () => {
     const result = spawnSync("bash", [scriptPath, "--fix"], {
       env: {
         ...process.env,
-        PATH: `${binDir}:${process.env.PATH || ""}`,
+        PATH: `${binDir}:/usr/bin:/bin`,
         AO_REPO_ROOT: fakeRepo,
         AO_CONFIG_PATH: configPath,
         AO_DOCTOR_TMP_ROOT: tmpRoot,
