@@ -63,10 +63,22 @@ export async function GET(request: Request) {
       dashboardSessions = activeIndices.map((index) => dashboardSessions[index]);
     }
 
+    const metadataController = new AbortController();
+    const cancelMetadata = () => metadataController.abort(request.signal.reason);
+    request.signal.addEventListener("abort", cancelMetadata, { once: true });
     const metadataSettled = await settlesWithin(
-      enrichSessionsMetadata(workerSessions, dashboardSessions, config, registry),
+      enrichSessionsMetadata(
+        workerSessions,
+        dashboardSessions,
+        config,
+        registry,
+        metadataController.signal,
+      ),
       METADATA_ENRICH_TIMEOUT_MS,
     );
+    if (!metadataSettled) metadataController.abort(new Error("Metadata enrichment timed out"));
+    request.signal.removeEventListener("abort", cancelMetadata);
+    request.signal.throwIfAborted();
 
     if (metadataSettled) {
       const prDeadlineAt = Date.now() + PR_ENRICH_TIMEOUT_MS;
@@ -111,6 +123,9 @@ export async function GET(request: Request) {
       correlationId,
     );
   } catch (err) {
+    if (request.signal.aborted) {
+      return jsonWithCorrelation({ error: "Request cancelled" }, { status: 499 }, correlationId);
+    }
     const { config } = await getServices().catch(() => ({ config: undefined }));
     if (config) {
       recordApiObservation({

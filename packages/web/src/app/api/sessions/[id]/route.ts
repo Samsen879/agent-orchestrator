@@ -23,7 +23,13 @@ export async function GET(_request: NextRequest, { params }: { params: Promise<{
     const dashboardSession = sessionToDashboard(coreSession);
 
     // Enrich metadata (issue labels, agent summaries, issue titles)
-    await enrichSessionsMetadata([coreSession], [dashboardSession], config, registry);
+    await enrichSessionsMetadata(
+      [coreSession],
+      [dashboardSession],
+      config,
+      registry,
+      _request.signal,
+    );
 
     // Enrich PR — serve cache immediately, refresh in background if stale
     if (coreSession.pr) {
@@ -54,6 +60,9 @@ export async function GET(_request: NextRequest, { params }: { params: Promise<{
 
     return jsonWithCorrelation(dashboardSession, { status: 200 }, correlationId);
   } catch (error) {
+    if (_request.signal.aborted) {
+      return jsonWithCorrelation({ error: "Request cancelled" }, { status: 499 }, correlationId);
+    }
     const { id } = await params;
     const { config, sessionManager } = await getServices().catch(() => ({
       config: undefined,

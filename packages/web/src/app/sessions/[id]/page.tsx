@@ -62,68 +62,102 @@ export default function SessionPage() {
   }, [session, id]);
 
   // Fetch session data (memoized to avoid recreating on every render)
-  const fetchSession = useCallback(async () => {
-    try {
-      const res = await fetch(`/api/sessions/${encodeURIComponent(id)}`);
-      if (res.status === 404) {
-        setError("Session not found");
-        setLoading(false);
-        return;
-      }
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = (await res.json()) as DashboardSession;
-      setSession(data);
-      setError(null);
-    } catch (err) {
-      console.error("Failed to fetch session:", err);
-      setError("Failed to load session");
-    } finally {
-      setLoading(false);
-    }
-  }, [id]);
-
-  const fetchZoneCounts = useCallback(async () => {
-    if (!sessionIsOrchestrator || !sessionProjectId) return;
-    try {
-      const res = await fetch(`/api/sessions?project=${encodeURIComponent(sessionProjectId)}`);
-      if (!res.ok) return;
-      const body = (await res.json()) as { sessions: DashboardSession[] };
-      const sessions = body.sessions ?? [];
-      const counts: ZoneCounts = {
-        merge: 0,
-        respond: 0,
-        review: 0,
-        pending: 0,
-        working: 0,
-        done: 0,
-      };
-      for (const s of sessions) {
-        if (!isOrchestratorSession(s)) {
-          counts[getAttentionLevel(s) as AttentionLevel]++;
+  const fetchSession = useCallback(
+    async (signal?: AbortSignal) => {
+      try {
+        const res = await fetch(`/api/sessions/${encodeURIComponent(id)}`, { signal });
+        if (res.status === 404) {
+          setError("Session not found");
+          setLoading(false);
+          return;
         }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = (await res.json()) as DashboardSession;
+        setSession(data);
+        setError(null);
+      } catch (err) {
+        if (signal?.aborted) return;
+        console.error("Failed to fetch session:", err);
+        setError("Failed to load session");
+      } finally {
+        setLoading(false);
       }
-      setZoneCounts(counts);
-    } catch {
-      // non-critical - status strip just won't show
-    }
-  }, [sessionIsOrchestrator, sessionProjectId]);
+    },
+    [id],
+  );
 
-  // Initial fetch — session first, zone counts after (avoids blocking on slow /api/sessions)
-  useEffect(() => {
-    fetchSession();
-    // Delay zone counts so the heavy /api/sessions call doesn't contend with session load
-    const t = setTimeout(fetchZoneCounts, 2000);
-    return () => clearTimeout(t);
-  }, [fetchSession, fetchZoneCounts]);
+  const fetchZoneCounts = useCallback(
+    async (signal?: AbortSignal) => {
+      if (!sessionIsOrchestrator || !sessionProjectId) return;
+      try {
+        const res = await fetch(`/api/sessions?project=${encodeURIComponent(sessionProjectId)}`, {
+          signal,
+        });
+        if (!res.ok) return;
+        const body = (await res.json()) as { sessions: DashboardSession[] };
+        const sessions = body.sessions ?? [];
+        const counts: ZoneCounts = {
+          merge: 0,
+          respond: 0,
+          review: 0,
+          pending: 0,
+          working: 0,
+          done: 0,
+        };
+        for (const s of sessions) {
+          if (!isOrchestratorSession(s)) {
+            counts[getAttentionLevel(s) as AttentionLevel]++;
+          }
+        }
+        setZoneCounts(counts);
+      } catch {
+        if (signal?.aborted) return;
+        // non-critical - status strip just won't show
+      }
+    },
+    [sessionIsOrchestrator, sessionProjectId],
+  );
 
-  // Poll every 5s
+  // Poll only after the previous request settles. A fixed interval can create an
+  // unbounded request queue when metadata enrichment takes longer than 5 seconds.
   useEffect(() => {
-    const interval = setInterval(() => {
-      fetchSession();
-      fetchZoneCounts();
-    }, 5000);
-    return () => clearInterval(interval);
-  }, [fetchSession, fetchZoneCounts]);
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const poll = async () => {
+      await fetchSession(controller.signal);
+      if (!controller.signal.aborted) {
+        timer = setTimeout(() => void poll(), 5000);
+      }
+    };
+
+    void poll();
+    return () => {
+      controller.abort();
+      if (timer) clearTimeout(timer);
+    };
+  }, [fetchSession]);
+
+  useEffect(() => {
+    if (!sessionIsOrchestrator || !sessionProjectId) return;
+
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const poll = async () => {
+      await fetchZoneCounts(controller.signal);
+      if (!controller.signal.aborted) {
+        timer = setTimeout(() => void poll(), 5000);
+      }
+    };
+
+    // Let the detail request populate first before starting the heavier list request.
+    timer = setTimeout(() => void poll(), 2000);
+    return () => {
+      controller.abort();
+      if (timer) clearTimeout(timer);
+    };
+  }, [fetchZoneCounts, sessionIsOrchestrator, sessionProjectId]);
 
   if (loading) {
     return (

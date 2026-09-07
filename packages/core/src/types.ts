@@ -312,7 +312,10 @@ export interface Agent {
   isProcessRunning(handle: RuntimeHandle): Promise<boolean>;
 
   /** Extract information from agent's internal data (summary, cost, session ID) */
-  getSessionInfo(session: Session): Promise<AgentSessionInfo | null>;
+  getSessionInfo(
+    session: Session,
+    options?: { signal?: AbortSignal },
+  ): Promise<AgentSessionInfo | null>;
 
   /**
    * Optional: get a launch command that resumes a previous session.

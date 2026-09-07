@@ -303,10 +303,13 @@ export async function enrichSessionAgentSummary(
   dashboard: DashboardSession,
   coreSession: Session,
   agent: Agent,
+  signal?: AbortSignal,
 ): Promise<void> {
   if (dashboard.summary) return;
   try {
-    const info = await agent.getSessionInfo(coreSession);
+    signal?.throwIfAborted();
+    const info = await agent.getSessionInfo(coreSession, { signal });
+    signal?.throwIfAborted();
     if (info?.summary) {
       dashboard.summary = info.summary;
       dashboard.summaryIsFallback = info.summaryIsFallback ?? false;
@@ -325,8 +328,10 @@ export async function enrichSessionIssueTitle(
   dashboard: DashboardSession,
   tracker: Tracker,
   project: ProjectConfig,
+  signal?: AbortSignal,
 ): Promise<void> {
   if (!dashboard.issueUrl || !dashboard.issueLabel) return;
+  signal?.throwIfAborted();
 
   // Check cache first
   const cached = issueTitleCache.get(dashboard.issueUrl);
@@ -339,6 +344,7 @@ export async function enrichSessionIssueTitle(
     // Strip "#" prefix from GitHub-style labels to get the identifier
     const identifier = dashboard.issueLabel.replace(/^#/, "");
     const issue = await tracker.getIssue(identifier, project);
+    signal?.throwIfAborted();
     if (issue.title) {
       dashboard.issueTitle = issue.title;
       issueTitleCache.set(dashboard.issueUrl, issue.title);
@@ -358,7 +364,9 @@ export async function enrichSessionsMetadata(
   dashboardSessions: DashboardSession[],
   config: OrchestratorConfig,
   registry: PluginRegistry,
+  signal?: AbortSignal,
 ): Promise<void> {
+  signal?.throwIfAborted();
   // Resolve projects once per session (avoids repeated Object.entries lookups)
   const projects = coreSessions.map((core) => resolveProject(core, config.projects));
 
@@ -377,7 +385,7 @@ export async function enrichSessionsMetadata(
     if (!agentName) return Promise.resolve();
     const agent = registry.get<Agent>("agent", agentName);
     if (!agent) return Promise.resolve();
-    return enrichSessionAgentSummary(dashboardSessions[i], core, agent);
+    return enrichSessionAgentSummary(dashboardSessions[i], core, agent, signal);
   });
 
   // Enrich issue titles (fetches from tracker API, cached with TTL)
@@ -388,10 +396,11 @@ export async function enrichSessionsMetadata(
     if (!project?.tracker) return Promise.resolve();
     const tracker = registry.get<Tracker>("tracker", project.tracker.plugin);
     if (!tracker) return Promise.resolve();
-    return enrichSessionIssueTitle(dashboardSessions[i], tracker, project);
+    return enrichSessionIssueTitle(dashboardSessions[i], tracker, project, signal);
   });
 
   await Promise.allSettled([...summaryPromises, ...issueTitlePromises]);
+  signal?.throwIfAborted();
 }
 
 /** Compute dashboard stats from a list of sessions. */
