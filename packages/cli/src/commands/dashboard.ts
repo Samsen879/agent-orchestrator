@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 import chalk from "chalk";
 import type { Command } from "commander";
 import { loadConfig } from "@composio/ao-core";
@@ -77,7 +79,13 @@ export function registerDashboard(program: Command): void {
         config.directTerminalPort,
       );
 
-      const child = spawn("npx", ["next", "dev", "-p", String(port)], {
+      const isDevMode = existsSync(resolve(webDir, "server"));
+      const command = isDevMode ? "pnpm" : "node";
+      const args = isDevMode
+        ? ["run", "dev"]
+        : [resolve(webDir, "dist-server", "start-all.js")];
+
+      const child = spawn(command, args, {
         cwd: webDir,
         stdio: ["inherit", "inherit", "pipe"],
         env,
@@ -126,7 +134,11 @@ export function registerDashboard(program: Command): void {
       }
 
       try {
-        await waitForDashboardReady(child, [port]);
+        await waitForDashboardReady(child, [
+          port,
+          Number(env["TERMINAL_PORT"]),
+          Number(env["DIRECT_TERMINAL_PORT"]),
+        ]);
       } catch (err) {
         removeSignalHandlers();
         await stopDashboardProcessTree(child);
