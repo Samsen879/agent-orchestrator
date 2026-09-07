@@ -42,7 +42,6 @@ import pluginAgentOpencode from "@composio/ao-plugin-agent-opencode";
 import pluginWorkspaceWorktree from "@composio/ao-plugin-workspace-worktree";
 import pluginScmGithub from "@composio/ao-plugin-scm-github";
 import pluginTrackerGithub from "@composio/ao-plugin-tracker-github";
-import pluginTrackerLinear from "@composio/ao-plugin-tracker-linear";
 
 export interface Services {
   config: OrchestratorConfig;
@@ -85,7 +84,21 @@ async function initServices(): Promise<Services> {
   registry.register(pluginWorkspaceWorktree);
   registry.register(pluginScmGithub);
   registry.register(pluginTrackerGithub);
-  registry.register(pluginTrackerLinear);
+
+  // The Linear plugin has an optional Composio SDK transport. Loading it in
+  // every dashboard build makes Next try to resolve that optional SDK even
+  // when no project uses Linear, which can stall the dev compiler. Keep it a
+  // native runtime import and only load it for projects configured for Linear.
+  const usesLinear = Object.values(config.projects).some(
+    (project) => project.tracker?.plugin === "linear",
+  );
+  if (usesLinear) {
+    const linearPluginSpecifier = "@composio/ao-plugin-tracker-linear";
+    const { default: pluginTrackerLinear } = await import(
+      /* webpackIgnore: true */ linearPluginSpecifier
+    );
+    registry.register(pluginTrackerLinear);
+  }
 
   const sessionManager = createSessionManager({ config, registry });
 
