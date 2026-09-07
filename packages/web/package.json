@@ -13,7 +13,7 @@
   ],
   "scripts": {
     "dev": "concurrently --kill-others \"npm:dev:next\" \"npm:dev:terminal\" \"npm:dev:direct-terminal\"",
-    "dev:next": "next dev -p ${PORT:-3000}",
+    "dev:next": "next dev --turbopack -p ${PORT:-3000}",
     "dev:terminal": "tsx server/terminal-websocket.ts",
     "dev:direct-terminal": "tsx server/direct-terminal-ws.ts",
     "build": "next build && tsc -p tsconfig.server.json",

@@ -7,9 +7,9 @@ const nextConfig = {
     "@composio/ao-plugin-runtime-tmux",
     "@composio/ao-plugin-scm-github",
     "@composio/ao-plugin-tracker-github",
-    "@composio/ao-plugin-tracker-linear",
     "@composio/ao-plugin-workspace-worktree",
   ],
+  serverExternalPackages: ["@composio/ao-plugin-tracker-linear"],
 };
 
 export default nextConfig;
