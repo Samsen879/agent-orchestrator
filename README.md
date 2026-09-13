@@ -1,3 +1,29 @@
+# Archived — continued development has moved to ao-pilot
+
+This `Samsen879/agent-orchestrator` fork is retired and retained read-only for
+source provenance, tags, commits and historical PR records. It is not the active
+installation, startup or issue-reporting repository.
+
+Use **[Samsen879/ao-pilot](https://github.com/Samsen879/ao-pilot)** for continued
+development, installation/bootstrap instructions and new issues. Use the owned
+`ao-pilot` command rather than launching this retired checkout or a legacy `ao`
+wrapper. The full accepted browser Dashboard, lifecycle/session command surface
+and original-session recovery are maintained in ao-pilot.
+
+See the [deployment and recovery handoff](https://github.com/Samsen879/ao-pilot/blob/main/docs/consolidation/ao-pilot-closeout-handoff.md)
+for exact source authority, real WSL cold-start acceptance, recovery entrypoints
+and rollback boundaries. Existing `agent-orchestrator.yaml` and
+`~/.agent-orchestrator` paths may remain as identity-preserving compatibility
+paths; do not rename them or silently create replacement conversations.
+
+Retirement audit on 2026-09-13 found **zero open pull requests and zero open
+issues** in this fork. No repository history or session data is deleted. Historical
+references below describe the retained project snapshot, not the current supported
+deployment. This notice applies to this fork, not to the upstream project.
+
+---
+
+
 <div align="center">
   <img src="ao-logo.svg" alt="Agent Orchestrator" width="160" height="160" />
 
